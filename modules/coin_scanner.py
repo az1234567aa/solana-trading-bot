@@ -10,9 +10,6 @@ import aiohttp
 from config import (
     AXIOM_AUTH_TOKEN,
     AUTO_BUY,
-    BIRDEYE_API_KEY,
-    BIRDEYE_OVERVIEW_URL,
-    BIRDEYE_TRENDING_URL,
     DEXSCREENER_BOOSTS_URL,
     DEXSCREENER_PROFILES_URL,
     DEXSCREENER_TOKEN_URL,
@@ -126,21 +123,13 @@ class CoinScanner:
                 logger.warning("%s failed: %s", label, exc)
         return mints
 
-    async def _fetch_birdeye_trending(self) -> list[str]:
-        if not BIRDEYE_API_KEY or BIRDEYE_API_KEY.startswith("your_"):
-            return []
-        try:
-            headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
-            data = await fetch_json(
-                self.session, "GET", BIRDEYE_TRENDING_URL,
-                params={"sort_by": "rank", "sort_type": "asc", "offset": "0", "limit": "20"},
-                headers=headers, label="Birdeye trending",
-            )
-            tokens = data.get("data", {}).get("tokens", []) or data.get("data", []) or []
-            return [t.get("address", "") for t in tokens if t.get("address")]
-        except Exception as exc:
-            logger.warning("Birdeye trending failed: %s", exc)
-            return []
+    @staticmethod
+    def _flow_from_pair(pair: dict[str, Any]) -> dict[str, Any]:
+        """Buy/sell txn counts from DexScreener — free, no Birdeye key needed."""
+        txns = (pair.get("txns") or {}).get("h24") or {}
+        buys = float(txns.get("buys", 0) or 0)
+        sells = float(txns.get("sells", 0) or 0)
+        return {"buy24h": buys, "sell24h": sells, "source": "dexscreener"}
 
     def _is_graduated(self, pair: dict[str, Any]) -> bool:
         pump = pair.get("pumpfun") or {}
@@ -193,23 +182,6 @@ class CoinScanner:
         rug = await fetch_rug_report(self.session, mint)
         return rug.ok, rug.score
 
-    async def _birdeye_data(self, mint: str) -> dict[str, Any]:
-        if not BIRDEYE_API_KEY or BIRDEYE_API_KEY.startswith("your_"):
-            return {}
-        try:
-            headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
-            data = await fetch_json(
-                self.session,
-                "GET",
-                BIRDEYE_OVERVIEW_URL,
-                params={"address": mint},
-                headers=headers,
-                label=f"Birdeye {mint[:8]}",
-            )
-            return data.get("data", {}) or {}
-        except Exception:
-            return {}
-
     async def _twitter_mentions(self, symbol: str) -> int:
         if not TWITTER_BEARER_TOKEN or TWITTER_BEARER_TOKEN.startswith("your_"):
             return 0
@@ -239,7 +211,7 @@ class CoinScanner:
         pair: dict[str, Any],
         rugcheck_ok: bool,
         rugcheck_score: float,
-        birdeye: dict[str, Any],
+        flow: dict[str, Any],
         twitter_mentions: int,
     ) -> tuple[float, dict[str, Any]]:
         liquidity_usd = float(pair.get("liquidity", {}).get("usd", 0) or 0)
@@ -336,14 +308,14 @@ class CoinScanner:
         else:
             safety_score = 1   # borderline — passes 500 filter but still risky
 
-        # Birdeye buy/sell ratio bonus (0-5)
-        buy_24h = float(birdeye.get("buy24h", 0) or 0)
-        sell_24h = float(birdeye.get("sell24h", 0) or 0)
+        # DexScreener buy/sell txn ratio bonus (0-5) — free flow data
+        buy_24h = float(flow.get("buy24h", 0) or 0)
+        sell_24h = float(flow.get("sell24h", 0) or 0)
         if buy_24h + sell_24h > 0:
             buy_ratio = buy_24h / (buy_24h + sell_24h)
-            birdeye_score = clamp(buy_ratio * 5, 0, 5)
+            flow_score = clamp(buy_ratio * 5, 0, 5)
         else:
-            birdeye_score = 0
+            flow_score = 0
 
         total = (
             liquidity_score
@@ -353,7 +325,7 @@ class CoinScanner:
             + volume_score
             + twitter_score
             + safety_score
-            + birdeye_score
+            + flow_score
         )
         total = clamp(total, 0, 100)
 
@@ -365,7 +337,7 @@ class CoinScanner:
             "volume": f"{volume_score}/15 (${volume_24h:,.0f})",
             "twitter": f"{twitter_score}/15 ({twitter_mentions} mentions)",
             "rugcheck": f"{safety_score:.0f}/10 (score {rugcheck_score:.0f})",
-            "birdeye_buy_ratio": f"{birdeye_score:.1f}/5",
+            "flow_ratio": f"{flow_score:.1f}/5 (DexScreener {buy_24h:.0f}b/{sell_24h:.0f}s)",
             "total": f"{total:.0f}/100",
         }
         return total, breakdown
@@ -426,9 +398,9 @@ class CoinScanner:
             self._filter_rejected.add(mint)
             return
 
-        birdeye = await self._birdeye_data(mint)
+        flow = self._flow_from_pair(pair)
         twitter_mentions = await self._twitter_mentions(symbol)
-        score, breakdown = self._score_token(pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions)
+        score, breakdown = self._score_token(pair, rugcheck_ok, rugcheck_score, flow, twitter_mentions)
 
         logger.info(
             "Scanned %s (%s) | score %.0f | mcap $%s | liq $%s | vol $%s | dex %s | age %.1fh",
@@ -449,7 +421,7 @@ class CoinScanner:
             breakdown=breakdown,
             rugcheck_ok=rugcheck_ok,
             rugcheck_score=rugcheck_score,
-            birdeye=birdeye,
+            birdeye=flow,
             twitter_mentions=twitter_mentions,
             source="scanner",
             reason_extra=f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}",
@@ -567,7 +539,7 @@ class CoinScanner:
             sell_route_ok=sell_ok,
             score=score,
             breakdown=breakdown,
-            birdeye=birdeye,
+            birdeye=flow,
             twitter_mentions=twitter_mentions,
             on_loss_cooldown=rm.on_cooldown(mint) if rm else False,
             prior_losses=rm.prior_loss_count(mint) if rm else 0,
@@ -672,10 +644,10 @@ class CoinScanner:
                 self._filter_rejected.add(mint)
                 return
 
-            birdeye = await self._birdeye_data(mint)
+            flow = self._flow_from_pair(pair)
             twitter_mentions = await self._twitter_mentions(symbol)
             raw_score, breakdown = self._score_token(
-                pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions,
+                pair, rugcheck_ok, rugcheck_score, flow, twitter_mentions,
             )
 
             boost = GMGN_SIGNAL_SCORE_BOOST if source == "signals" else 0
@@ -705,7 +677,7 @@ class CoinScanner:
                 breakdown=breakdown,
                 rugcheck_ok=rugcheck_ok,
                 rugcheck_score=rugcheck_score,
-                birdeye=birdeye,
+                birdeye=flow,
                 twitter_mentions=twitter_mentions,
                 source=f"GMGN {source}",
                 reason_extra=f"score {display_score:.0f}/100 | liq ${liq:,.0f}",
@@ -753,10 +725,10 @@ class CoinScanner:
                 self._filter_rejected.add(mint)
                 return
 
-            birdeye = await self._birdeye_data(mint)
+            flow = self._flow_from_pair(pair)
             twitter_mentions = await self._twitter_mentions(symbol)
             score, breakdown = self._score_token(
-                pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions,
+                pair, rugcheck_ok, rugcheck_score, flow, twitter_mentions,
             )
 
             # Boost graduating pump tokens (Axiom Pulse "final stretch" style)
@@ -787,7 +759,7 @@ class CoinScanner:
                 breakdown=breakdown,
                 rugcheck_ok=rugcheck_ok,
                 rugcheck_score=rugcheck_score,
-                birdeye=birdeye,
+                birdeye=flow,
                 twitter_mentions=twitter_mentions,
                 source=f"Pump.fun {source}",
                 reason_extra=(
@@ -877,13 +849,13 @@ class CoinScanner:
 
         profiles = await self._fetch_latest_profiles()
         boosts = await self._fetch_dexscreener_boosts()
-        birdeye = await self._fetch_birdeye_trending()
         gmgn_trending = await self._fetch_gmgn_trending()
         gmgn_signals = await self._fetch_gmgn_signals()
         dextools = await self._fetch_dextools_hot()
         axiom = await self._fetch_axiom_trending()
 
-        for source_mints in (profiles, boosts, birdeye, dextools, axiom):
+        dex_count = len(profiles) + len(boosts)
+        for source_mints in (profiles, boosts, dextools, axiom):
             for mint in source_mints:
                 if mint and not self._already_processed(mint) and mint not in candidates:
                     candidates.append(mint)
@@ -892,7 +864,7 @@ class CoinScanner:
             logger.info(
                 "Scanner cycle — %d candidates (dex=%d dextools=%d axiom=%d) | "
                 "GMGN trending=%d signals=%d",
-                len(candidates), len(profiles) + len(boosts) + len(birdeye),
+                len(candidates), dex_count,
                 len(dextools), len(axiom), len(gmgn_trending), len(gmgn_signals),
             )
 
@@ -920,7 +892,7 @@ class CoinScanner:
     async def run(self) -> None:
         self._running = True
         logger.info(
-            "Market scanner started — DexScreener + Birdeye + GMGN"
+            "Market scanner started — DexScreener (free) + GMGN"
             + (" + Pump.fun" if SCAN_PUMPFUN_ENABLED else "")
             + (" + DexTools" if DEXTOOLS_API_KEY else "")
             + (" + Axiom" if AXIOM_AUTH_TOKEN else "")

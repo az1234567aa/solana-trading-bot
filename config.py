@@ -54,7 +54,6 @@ TRADER_BY_ADDRESS: dict[str, TraderConfig] = {t.address: t for t in TRADERS}
 # Environment
 WALLET_PRIVATE_KEY: str = os.getenv("WALLET_PRIVATE_KEY", "")
 HELIUS_API_KEY: str = os.getenv("HELIUS_API_KEY", "")
-BIRDEYE_API_KEY: str = os.getenv("BIRDEYE_API_KEY", "")
 TWITTER_BEARER_TOKEN: str = _env_token("TWITTER_BEARER_TOKEN")
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -80,8 +79,6 @@ DEXSCREENER_TOP_BOOSTS_URL = "https://api.dexscreener.com/token-boosts/top/v1"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 DEXSCREENER_PAIRS_URL = "https://api.dexscreener.com/latest/dex/pairs/solana/{pair}"
 RUGCHECK_URL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
-BIRDEYE_OVERVIEW_URL = "https://public-api.birdeye.so/defi/token_overview"
-BIRDEYE_TRENDING_URL = "https://public-api.birdeye.so/defi/token_trending"
 TWITTER_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
 TWITTER_USER_LOOKUP_URL = "https://api.twitter.com/2/users/by/username/{username}"
 TWITTER_USER_TWEETS_URL = "https://api.twitter.com/2/users/{user_id}/tweets"
