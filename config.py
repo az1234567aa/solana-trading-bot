@@ -168,10 +168,10 @@ DEXTOOLS_API_KEY: str = os.getenv("DEXTOOLS_API_KEY", "")
 AXIOM_AUTH_TOKEN: str = os.getenv("AXIOM_AUTH_TOKEN", "")
 
 # Twitter / X caller tracker (alerts + hit-rate stats like alpha groups)
-TWITTER_TRACKER_ENABLED = os.getenv("ENABLE_TWITTER_TRACKER", "true").lower() in ("true", "1", "yes")
+TWITTER_TRACKER_ENABLED = os.getenv("ENABLE_TWITTER_TRACKER", "false").lower() in ("true", "1", "yes")
 TWITTER_POLL_SECONDS = int(os.getenv("TWITTER_POLL_SECONDS", "90"))
 TWITTER_KEYWORD_SEARCH = os.getenv("TWITTER_KEYWORD_SEARCH", "true").lower() in ("true", "1", "yes")
-TWITTER_AUTO_BUY = os.getenv("TWITTER_AUTO_BUY", "true").lower() in ("true", "1", "yes")
+TWITTER_AUTO_BUY = os.getenv("TWITTER_AUTO_BUY", "false").lower() in ("true", "1", "yes")
 TWITTER_STATS_DAYS = int(os.getenv("TWITTER_STATS_DAYS", "30"))
 TWITTER_STATS_INTERVAL_HOURS = int(os.getenv("TWITTER_STATS_INTERVAL_HOURS", "24"))
 

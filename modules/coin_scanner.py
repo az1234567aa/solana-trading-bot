@@ -183,6 +183,8 @@ class CoinScanner:
         return rug.ok, rug.score
 
     async def _twitter_mentions(self, symbol: str) -> int:
+        if not TWITTER_TRACKER_ENABLED:
+            return 0
         if not TWITTER_BEARER_TOKEN or TWITTER_BEARER_TOKEN.startswith("your_"):
             return 0
         if not symbol or symbol == "UNKNOWN":
