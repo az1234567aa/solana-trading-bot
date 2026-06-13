@@ -139,8 +139,9 @@ PUMP_INITIAL_VIRTUAL_SOL     = 30.0   # pump.fun curve starts ~30 virtual SOL
 PUMP_BONDING_SOL_TARGET      = 85.0   # graduation threshold (~85 SOL)
 
 # Wallet tracker — parallel poll; lower = faster copy (Helius free tier OK at 12s)
-WALLET_POLL_INTERVAL_SECONDS = int(os.getenv("WALLET_POLL_INTERVAL_SECONDS", "12"))
-WALLET_POLL_GAP_SECONDS = float(os.getenv("WALLET_POLL_GAP_SECONDS", "0.5"))
+WALLET_POLL_INTERVAL_SECONDS = int(os.getenv("WALLET_POLL_INTERVAL_SECONDS", "20"))
+WALLET_POLL_GAP_SECONDS = float(os.getenv("WALLET_POLL_GAP_SECONDS", "1.5"))
+HELIUS_MIN_INTERVAL_SEC = float(os.getenv("HELIUS_MIN_INTERVAL_SEC", "2.0"))
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5

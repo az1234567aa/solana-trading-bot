@@ -96,6 +96,7 @@ class Executor:
         self._jupiter_last_call = 0.0
         self._buy_in_flight: set[str] = set()
         self._recent_buys: dict[str, float] = {}  # mint → unix time
+        self._balance_cache: dict[str, tuple[float, int, float]] = {}
 
     def can_buy_mint(self, mint: str) -> tuple[bool, str]:
         if mint in self._buy_in_flight:
@@ -133,7 +134,7 @@ class Executor:
             "method": "getBalance",
             "params": [str(self.keypair.pubkey())],
         }
-        for rpc in (HELIUS_RPC_URL, SOLANA_SEND_RPC_URL):
+        for rpc in (SOLANA_SEND_RPC_URL, HELIUS_RPC_URL):
             try:
                 async with self.session.post(rpc, json=body) as resp:
                     data = await resp.json()
@@ -699,21 +700,28 @@ class Executor:
         if self.paper_trade or not self.keypair:
             return 0.0, 6
 
-        for rpc_url in (HELIUS_RPC_URL, SOLANA_SEND_RPC_URL):
-            payload = {
-                "jsonrpc": "2.0", "id": 1,
-                "method": "getTokenAccountsByOwner",
-                "params": [
-                    str(self.keypair.pubkey()),
-                    {"mint": mint},
-                    {"encoding": "jsonParsed"},
-                ],
-            }
+        cached = self._balance_cache.get(mint)
+        if cached and (time.time() - cached[2]) < 12:
+            return cached[0], cached[1]
+
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                str(self.keypair.pubkey()),
+                {"mint": mint},
+                {"encoding": "jsonParsed"},
+            ],
+        }
+        # Public RPC first — saves Helius quota for copy-trade tx polling
+        for rpc_url in (SOLANA_SEND_RPC_URL, HELIUS_RPC_URL):
             try:
-                data = await fetch_json(
-                    self.session, "POST", rpc_url, json_body=payload,
-                    label=f"Balance {mint[:8]}",
-                )
+                async with self.session.post(
+                    rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=12),
+                ) as resp:
+                    if resp.status == 429:
+                        continue
+                    data = await resp.json()
                 accounts = data.get("result", {}).get("value", [])
                 if not accounts:
                     continue
@@ -731,6 +739,7 @@ class Executor:
                     if raw > best_raw:
                         best_raw, best_amount, best_decimals = raw, amt, dec
                 if best_raw > 0:
+                    self._balance_cache[mint] = (best_amount, best_decimals, time.time())
                     return best_amount, best_decimals
             except Exception:
                 continue

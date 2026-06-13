@@ -25,7 +25,9 @@ from config import (
     TRADERS,
     USDC_MINT,
     WALLET_POLL_INTERVAL_SECONDS,
+    WALLET_POLL_GAP_SECONDS,
 )
+from modules.helius_limiter import throttle as helius_throttle
 from modules.council_gate import council_gate
 from modules.rugcheck_client import fetch_rug_report
 from modules.utils import fetch_json, lamports_to_sol, sol_to_lamports
@@ -54,6 +56,7 @@ class WalletTracker:
             "type": "SWAP",
         }
         try:
+            await helius_throttle()
             async with self.session.get(
                 url, params=params, timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
@@ -347,11 +350,12 @@ class WalletTracker:
         )
 
         while self._running:
-            # Poll all wallets in parallel — fastest copy path
-            await asyncio.gather(
-                *[self._poll_wallet(trader.address) for trader in TRADERS],
-                return_exceptions=True,
-            )
+            # Sequential poll — parallel bursts hit Helius free-tier 429
+            for trader in TRADERS:
+                if not self._running:
+                    break
+                await self._poll_wallet(trader.address)
+                await asyncio.sleep(WALLET_POLL_GAP_SECONDS)
             await asyncio.sleep(WALLET_POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:

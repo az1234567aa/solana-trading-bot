@@ -781,10 +781,8 @@ class RiskManager:
                 open_positions = [p for p in self.positions.values() if not p.closed]
                 if open_positions:
                     logger.debug("Monitoring %d open position(s)", len(open_positions))
-                    await asyncio.gather(
-                        *[self._evaluate_position(p) for p in open_positions],
-                        return_exceptions=True,
-                    )
+                    for position in open_positions:
+                        await self._evaluate_position(position)
             except Exception as exc:
                 logger.error("Risk manager loop error: %s", exc)
             await asyncio.sleep(RISK_POLL_INTERVAL_SECONDS)
