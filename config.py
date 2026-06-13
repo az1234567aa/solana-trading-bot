@@ -111,11 +111,17 @@ BUY_SIZE_PCT_OF_WALLET = 0.08     # each buy = 8% of tradeable SOL
 
 # Scanner settings — autonomous discovery (Axiom Pulse "graduated" style)
 SCAN_INTERVAL_SECONDS  = int(os.getenv("SCAN_INTERVAL_SECONDS", "15"))
-SCAN_MIN_SCORE         = int(os.getenv("SCAN_MIN_SCORE", "70"))
-SCAN_MIN_LIQUIDITY_USD = 15_000   # graduated pool minimum
-SCAN_MIN_MCAP_USD      = 25_000   # skip micro-dead coins
+SCAN_MIN_SCORE         = int(os.getenv("SCAN_MIN_SCORE", "82"))   # raw score floor
+SCAN_MIN_LIQUIDITY_USD = 18_000   # graduated pool minimum (was 15k — too thin)
+SCAN_MIN_MCAP_USD      = 30_000   # skip micro-dead coins
 SCAN_MAX_MCAP_USD      = 600_000  # memecoin sweet spot
-SCAN_MIN_AGE_HOURS     = 0.5      # at least 30 min old
+SCAN_MIN_AGE_HOURS     = 1.0      # at least 1h old — skip brand-new noise
+SCAN_MIN_BUY_PRESSURE  = float(os.getenv("SCAN_MIN_BUY_PRESSURE", "55"))   # % buys in 24h
+SCAN_MIN_VOLUME_24H    = float(os.getenv("SCAN_MIN_VOLUME_24H", "200000"))  # $ vol gate
+# GMGN trending = swap volume list (weak). GMGN signals = smart-money buys (strong).
+SCAN_GMGN_TRENDING_BUY = os.getenv("SCAN_GMGN_TRENDING_BUY", "false").lower() in ("true", "1", "yes")
+SCAN_GMGN_SIGNALS_BUY  = os.getenv("SCAN_GMGN_SIGNALS_BUY", "true").lower() in ("true", "1", "yes")
+GMGN_SIGNAL_SCORE_BOOST = int(os.getenv("GMGN_SIGNAL_SCORE_BOOST", "5"))  # was +10 on everything
 SCAN_GRADUATED_ONLY    = True     # Raydium/Orca/Meteora/PumpSwap — sellable
 SCAN_REQUIRE_SELL_TEST = True     # verify Jupiter sell route BEFORE buying
 SCANNER_BUY_SOL        = MAX_BUY_SOL
@@ -153,7 +159,7 @@ MAX_HOLD_MINUTES = 45         # never hold longer than 45 min — force sell
 
 # HERMES Meme Council — 7 rule-based agents (zero LLM credits)
 USE_MEME_COUNCIL = os.getenv("USE_MEME_COUNCIL", "true").lower() in ("true", "1", "yes")
-MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "4"))  # 4/7 — fast but still gated
+MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "5"))  # 5/7 — no weak abstain buys
 COPY_COUNCIL_MIN = int(os.getenv("COPY_COUNCIL_MIN", "4"))  # copy trades: speed priority
 COPY_USE_COUNCIL = os.getenv("COPY_USE_COUNCIL", "true").lower() in ("true", "1", "yes")
 TWITTER_USE_COUNCIL = os.getenv("TWITTER_USE_COUNCIL", "true").lower() in ("true", "1", "yes")

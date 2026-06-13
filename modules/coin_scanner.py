@@ -18,15 +18,20 @@ from config import (
     DEXSCREENER_TOKEN_URL,
     DEXSCREENER_TOP_BOOSTS_URL,
     DEXTOOLS_API_KEY,
+    GMGN_SIGNAL_SCORE_BOOST,
     MEME_COUNCIL_MIN,
     RUGCHECK_URL,
+    SCAN_GMGN_SIGNALS_BUY,
+    SCAN_GMGN_TRENDING_BUY,
     SCAN_GRADUATED_ONLY,
     SCAN_INTERVAL_SECONDS,
     SCAN_MAX_MCAP_USD,
     SCAN_MIN_AGE_HOURS,
+    SCAN_MIN_BUY_PRESSURE,
     SCAN_MIN_LIQUIDITY_USD,
     SCAN_MIN_MCAP_USD,
     SCAN_MIN_SCORE,
+    SCAN_MIN_VOLUME_24H,
     SCAN_PUMPFUN_BONDING_MIN_PCT,
     SCAN_PUMPFUN_ALLOW_BONDING,
     SCAN_PUMPFUN_ENABLED,
@@ -450,6 +455,59 @@ class CoinScanner:
             reason_extra=f"mcap ${market_cap:,.0f} | liq ${liquidity_usd:,.0f} | {dex}",
         )
 
+    @staticmethod
+    def _pair_buy_pressure(pair: dict[str, Any]) -> float:
+        txns = pair.get("txns", {}) or {}
+        h24 = txns.get("h24", {}) or {}
+        buys = float(h24.get("buys", 0) or 0)
+        sells = float(h24.get("sells", 0) or 0)
+        total = buys + sells
+        return (buys / total * 100.0) if total > 0 else 0.0
+
+    @staticmethod
+    def _pair_volume_24h(pair: dict[str, Any]) -> float:
+        return float(pair.get("volume", {}).get("h24", 0) or 0)
+
+    def _scanner_catalyst_ok(
+        self,
+        *,
+        source: str,
+        raw_score: float,
+        pair: dict[str, Any],
+        twitter_mentions: int,
+    ) -> tuple[bool, str]:
+        """Scanner buys need a real catalyst — not random trending noise."""
+        src = source.lower()
+        pressure = self._pair_buy_pressure(pair)
+        vol = self._pair_volume_24h(pair)
+
+        if "gmgn signals" in src:
+            return True, f"GMGN smart-money buy signal | flow {pressure:.0f}%"
+
+        if "gmgn trending" in src:
+            return False, "GMGN trending disabled — volume list alone is not a reason"
+
+        if src == "scanner":
+            info = pair.get("info", {}) or {}
+            has_social = bool(info.get("websites") or info.get("socials"))
+            if raw_score >= SCAN_MIN_SCORE and pressure >= SCAN_MIN_BUY_PRESSURE and vol >= SCAN_MIN_VOLUME_24H:
+                if twitter_mentions >= 1 or has_social:
+                    return True, (
+                        f"DexScreener feed | score {raw_score:.0f} | "
+                        f"flow {pressure:.0f}% | vol ${vol:,.0f}"
+                    )
+                return False, f"score ok but no social proof ({twitter_mentions} tweets)"
+            return False, (
+                f"weak setup — score {raw_score:.0f}, flow {pressure:.0f}%, vol ${vol:,.0f}"
+            )
+
+        if src.startswith("pump"):
+            if raw_score >= SCAN_MIN_SCORE and pressure >= SCAN_MIN_BUY_PRESSURE:
+                return True, f"Pump.fun graduating | score {raw_score:.0f}"
+            return False, "pump candidate below score/flow floor"
+
+        return True, source
+
     async def _attempt_buy(
         self,
         *,
@@ -465,7 +523,19 @@ class CoinScanner:
         source: str,
         reason_extra: str,
         score_threshold: float | None = None,
+        raw_score: float | None = None,
     ) -> None:
+        raw = raw_score if raw_score is not None else score
+        catalyst_ok, catalyst_reason = self._scanner_catalyst_ok(
+            source=source,
+            raw_score=raw,
+            pair=pair,
+            twitter_mentions=twitter_mentions,
+        )
+        if not catalyst_ok:
+            logger.info("%s skip %s (score %.0f) — no catalyst: %s", source, symbol, score, catalyst_reason)
+            return
+
         can_buy, skip = await self.executor.can_trade(mint)
         if not can_buy:
             logger.info("%s skip %s (score %.0f) — %s", source, symbol, score, skip)
@@ -513,7 +583,7 @@ class CoinScanner:
                 f"{v.code}:{v.vote.value}" for v in council.votes[:7]
             )
 
-        reason = f"{source} — score {score:.0f}/100 | {reason_extra}"
+        reason = f"{catalyst_reason} | {reason_extra}"
         mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
         liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
 
@@ -582,7 +652,11 @@ class CoinScanner:
             return []
 
     async def _evaluate_gmgn_token(self, mint: str, source: str) -> None:
-        """Evaluate a GMGN-sourced token — uses lower score threshold since pre-filtered."""
+        """GMGN signals = smart money. GMGN trending = disabled by default (too noisy)."""
+        if source == "trending" and not SCAN_GMGN_TRENDING_BUY:
+            return
+        if source == "signals" and not SCAN_GMGN_SIGNALS_BUY:
+            return
         if self._already_processed(mint):
             return
 
@@ -600,42 +674,41 @@ class CoinScanner:
 
             birdeye = await self._birdeye_data(mint)
             twitter_mentions = await self._twitter_mentions(symbol)
-            score, breakdown = self._score_token(pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions)
-
-            # GMGN tokens get a 10-point boost — pre-filtered by smart money
-            boosted_score = min(score + 10, 100)
-            logger.info(
-                "GMGN [%s] %s (%s) — score %d/100 (boosted from %d) | liq $%s",
-                source, symbol, mint[:8], boosted_score, score,
-                f"{float(pair.get('liquidity', {}).get('usd', 0) or 0):,.0f}",
+            raw_score, breakdown = self._score_token(
+                pair, rugcheck_ok, rugcheck_score, birdeye, twitter_mentions,
             )
 
-            threshold = SCAN_MIN_SCORE - 5
-            if boosted_score < threshold:
+            boost = GMGN_SIGNAL_SCORE_BOOST if source == "signals" else 0
+            display_score = min(raw_score + boost, 100)
+            liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+            logger.info(
+                "GMGN [%s] %s (%s) — raw %.0f → %.0f | liq $%s",
+                source, symbol, mint[:8], raw_score, display_score, f"{liq:,.0f}",
+            )
+
+            if raw_score < SCAN_MIN_SCORE:
                 self._scored_low.add(mint)
+                logger.info("GMGN skip %s — raw score %.0f < %d", symbol, raw_score, SCAN_MIN_SCORE)
                 return
 
             jupiter_price = await self.executor.get_token_price_usd(mint)
             if not jupiter_price or jupiter_price <= 0:
-                logger.info(
-                    "GMGN skip %s (score %d) — Jupiter has no price, skipping",
-                    symbol, boosted_score,
-                )
+                logger.info("GMGN skip %s — Jupiter has no price", symbol)
                 return
 
-            liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
             await self._attempt_buy(
                 mint=mint,
                 symbol=symbol,
                 pair=pair,
-                score=boosted_score,
+                score=display_score,
+                raw_score=raw_score,
                 breakdown=breakdown,
                 rugcheck_ok=rugcheck_ok,
                 rugcheck_score=rugcheck_score,
                 birdeye=birdeye,
                 twitter_mentions=twitter_mentions,
                 source=f"GMGN {source}",
-                reason_extra=f"raw {score:.0f} | liq ${liq:,.0f}",
+                reason_extra=f"score {display_score:.0f}/100 | liq ${liq:,.0f}",
             )
         except Exception as exc:
             logger.error("Error evaluating GMGN token %s: %s", mint[:8], exc)
@@ -835,11 +908,12 @@ class CoinScanner:
             except Exception as exc:
                 logger.error("Error evaluating GMGN signal %s: %s", mint[:8], exc)
 
-        for mint in gmgn_trending[:10]:
-            try:
-                await self._evaluate_gmgn_token(mint, "trending")
-            except Exception as exc:
-                logger.error("Error evaluating GMGN trending %s: %s", mint[:8], exc)
+        if SCAN_GMGN_TRENDING_BUY:
+            for mint in gmgn_trending[:10]:
+                try:
+                    await self._evaluate_gmgn_token(mint, "trending")
+                except Exception as exc:
+                    logger.error("Error evaluating GMGN trending %s: %s", mint[:8], exc)
 
         await self._run_pumpfun_cycle()
 
@@ -851,7 +925,8 @@ class CoinScanner:
             + (" + DexTools" if DEXTOOLS_API_KEY else "")
             + (" + Axiom" if AXIOM_AUTH_TOKEN else "")
             + f" every {SCAN_INTERVAL_SECONDS}s | council {'ON' if USE_MEME_COUNCIL else 'OFF'}"
-            f" ({MEME_COUNCIL_MIN}/7 HERMES) | min score {SCAN_MIN_SCORE}",
+            f" ({MEME_COUNCIL_MIN}/7 HERMES) | min score {SCAN_MIN_SCORE}"
+            f" | GMGN trending={'ON' if SCAN_GMGN_TRENDING_BUY else 'OFF'}",
         )
 
         while self._running:

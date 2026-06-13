@@ -28,6 +28,8 @@ from config import (
     SCAN_MIN_SCORE,
     SCAN_MAX_MCAP_USD,
     SCAN_MIN_LIQUIDITY_USD,
+    SCAN_MIN_BUY_PRESSURE,
+    SCAN_MIN_VOLUME_24H,
     SCAN_PUMPFUN_ALLOW_BONDING,
     SCAN_PUMPFUN_BONDING_MIN_PCT,
     SCAN_PUMPFUN_MIN_USD_MCAP,
@@ -165,19 +167,29 @@ def _flow(candidate: TokenCandidate) -> AgentVote:
         pressure = be_buys / be_total * 100.0
 
     vol = float(candidate.pair.get("volume", {}).get("h24", 0) or 0)
-    if pressure >= 58 and vol >= 10_000:
-        return AgentVote(
-            "FLOW", "FLW", Vote.APPROVE,
-            f"buy pressure {pressure:.0f}% | vol ${vol:,.0f}",
-        )
+
+    if candidate.source == "copy":
+        return AgentVote("FLOW", "FLW", Vote.APPROVE, "copy trade — flow skipped")
+
     if pressure < 45:
         return AgentVote(
             "FLOW", "FLW", Vote.REJECT,
             f"sell-heavy {pressure:.0f}% buy pressure",
         )
-    if candidate.source == "copy":
-        return AgentVote("FLOW", "FLW", Vote.APPROVE, "copy trade — flow skipped")
-    return AgentVote("FLOW", "FLW", Vote.ABSTAIN, f"neutral flow {pressure:.0f}%")
+    if pressure < SCAN_MIN_BUY_PRESSURE:
+        return AgentVote(
+            "FLOW", "FLW", Vote.REJECT,
+            f"buy pressure {pressure:.0f}% < {SCAN_MIN_BUY_PRESSURE:.0f}%",
+        )
+    if vol < SCAN_MIN_VOLUME_24H:
+        return AgentVote(
+            "FLOW", "FLW", Vote.REJECT,
+            f"vol ${vol:,.0f} < ${SCAN_MIN_VOLUME_24H:,.0f}",
+        )
+    return AgentVote(
+        "FLOW", "FLW", Vote.APPROVE,
+        f"strong flow {pressure:.0f}% | vol ${vol:,.0f}",
+    )
 
 
 def _social(candidate: TokenCandidate) -> AgentVote:
@@ -191,8 +203,13 @@ def _social(candidate: TokenCandidate) -> AgentVote:
         return AgentVote("SOCIAL", "SOC", Vote.APPROVE, f"{mentions} Twitter mentions")
     if candidate.source in ("copy", "twitter") and mentions >= 1:
         return AgentVote("SOCIAL", "SOC", Vote.APPROVE, "caller / copy signal")
-    if has_social and candidate.score >= 70:
+    if "gmgn signals" in (candidate.source or "").lower():
+        return AgentVote("SOCIAL", "SOC", Vote.APPROVE, "GMGN smart-money signal")
+    if has_social and candidate.score >= SCAN_MIN_SCORE:
         return AgentVote("SOCIAL", "SOC", Vote.APPROVE, "DexScreener socials listed")
+    src = (candidate.source or "").lower()
+    if src in ("scanner",) or "gmgn trending" in src:
+        return AgentVote("SOCIAL", "SOC", Vote.REJECT, "no social proof — scanner skip")
     if mentions == 0 and not has_social:
         return AgentVote("SOCIAL", "SOC", Vote.ABSTAIN, "no social signal")
     return AgentVote("SOCIAL", "SOC", Vote.APPROVE, "weak but present socials")
@@ -231,6 +248,12 @@ def _hydra(candidate: TokenCandidate) -> AgentVote:
         )
     if candidate.source == "twitter":
         return AgentVote("HYDRA", "HYD", Vote.APPROVE, "Twitter signal — budget ok")
+    src = (candidate.source or "").lower()
+    if "gmgn trending" in src:
+        return AgentVote(
+            "HYDRA", "HYD", Vote.REJECT,
+            "GMGN trending alone — need copy/signals/score+flow",
+        )
     if candidate.score >= SCAN_MIN_SCORE:
         return AgentVote(
             "HYDRA", "HYD", Vote.APPROVE,
