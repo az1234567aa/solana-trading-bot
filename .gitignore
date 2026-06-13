@@ -2,7 +2,9 @@
 trade_log.jsonl
 trade_stats.json
 positions.json
+bot_state.json
 __pycache__/
 *.pyc
 *.log
 .DS_Store
+venv/

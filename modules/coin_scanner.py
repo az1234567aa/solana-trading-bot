@@ -9,6 +9,7 @@ import aiohttp
 
 from config import (
     AXIOM_AUTH_TOKEN,
+    AUTO_BUY,
     BIRDEYE_API_KEY,
     BIRDEYE_OVERVIEW_URL,
     BIRDEYE_TRENDING_URL,
@@ -42,7 +43,8 @@ from config import (
     TWITTER_SEARCH_URL,
     USE_MEME_COUNCIL,
 )
-from modules.meme_council import TokenCandidate, evaluate as council_evaluate
+from modules.council_gate import council_gate
+from modules.rugcheck_client import fetch_rug_report
 from modules import pumpfun
 from modules.utils import clamp, fetch_json, sol_to_lamports
 
@@ -182,28 +184,9 @@ class CoinScanner:
         return max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
 
     async def _rugcheck_score(self, mint: str) -> tuple[bool, float]:
-        """
-        RugCheck score: 0 = safe, higher = MORE RISKY.
-        We reject anything above 500 (medium-high risk).
-        Returns (is_safe, risk_score).
-        """
-        try:
-            url = RUGCHECK_URL.format(mint=mint)
-            data = await fetch_json(self.session, "GET", url, label=f"RugCheck {mint[:8]}")
-            score = float(data.get("score", 0) or 0)
-            risks = data.get("risks", []) or []
-            is_honeypot = any(
-                "honeypot" in str(r.get("name", "")).lower()
-                or "cannot sell" in str(r.get("description", "")).lower()
-                for r in risks
-            )
-            rugged = data.get("rugged", False)
-            # Reject if score too high (risky) or flagged
-            too_risky = score > 500
-            return not (is_honeypot or rugged or too_risky), score
-        except Exception:
-            logger.info("RugCheck unavailable for %s — skipping (fail closed)", mint[:8])
-            return False, 999.0
+        """RugCheck: 0 = safe, higher = riskier. Reject above 500."""
+        rug = await fetch_rug_report(self.session, mint)
+        return rug.ok, rug.score
 
     async def _birdeye_data(self, mint: str) -> dict[str, Any]:
         if not BIRDEYE_API_KEY or BIRDEYE_API_KEY.startswith("your_"):
@@ -500,33 +483,56 @@ class CoinScanner:
             return
 
         rm = self.executor.risk_manager
-        candidate = TokenCandidate(
+        daily_ok = True
+        if rm:
+            ok_budget, _ = await rm.can_open_new_trade()
+            daily_ok = ok_budget
+
+        approved, council, _rug = await council_gate(
+            self.session,
             mint=mint,
             symbol=symbol,
             pair=pair,
-            rugcheck_ok=rugcheck_ok,
-            rugcheck_score=rugcheck_score,
-            birdeye=birdeye,
-            twitter_mentions=twitter_mentions,
-            score=score,
-            breakdown=breakdown,
             source=source,
             sell_route_ok=sell_ok,
+            score=score,
+            breakdown=breakdown,
+            birdeye=birdeye,
+            twitter_mentions=twitter_mentions,
             on_loss_cooldown=rm.on_cooldown(mint) if rm else False,
             prior_losses=rm.prior_loss_count(mint) if rm else 0,
+            daily_budget_ok=daily_ok,
         )
-
-        if USE_MEME_COUNCIL:
-            council = council_evaluate(candidate, MEME_COUNCIL_MIN)
-            if not council.approved:
-                logger.info(
-                    "%s skip %s — Meme Council %s rejected",
-                    source, symbol, council.score,
-                )
-                return
+        if not approved:
+            label = council.score if council else "bypass"
+            logger.info("%s skip %s — HERMES Council %s rejected", source, symbol, label)
+            return
+        if council:
             breakdown = {**breakdown, "council": council.score}
+            breakdown["council_detail"] = " | ".join(
+                f"{v.code}:{v.vote.value}" for v in council.votes[:7]
+            )
 
         reason = f"{source} — score {score:.0f}/100 | {reason_extra}"
+        mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+
+        if not AUTO_BUY:
+            logger.info("HERMES signal (alerts-only) — %s scored %.0f (%s)", symbol, score, source)
+            rm = self.executor.risk_manager
+            if rm and rm.alerter:
+                await rm.alerter.send_hermes_signal(
+                    symbol=symbol,
+                    mint=mint,
+                    source=source,
+                    score=score,
+                    council_result=council,
+                    reason=reason,
+                    mcap_usd=mcap,
+                    liq_usd=liq,
+                )
+            return
+
         logger.info("BUY signal — %s scored %.0f (%s)", symbol, score, source)
         buy_sol = await self.executor.calc_buy_size_sol()
         await self.executor.buy_token(
@@ -845,7 +851,7 @@ class CoinScanner:
             + (" + DexTools" if DEXTOOLS_API_KEY else "")
             + (" + Axiom" if AXIOM_AUTH_TOKEN else "")
             + f" every {SCAN_INTERVAL_SECONDS}s | council {'ON' if USE_MEME_COUNCIL else 'OFF'}"
-            f" ({MEME_COUNCIL_MIN}/5) | min score {SCAN_MIN_SCORE}",
+            f" ({MEME_COUNCIL_MIN}/7 HERMES) | min score {SCAN_MIN_SCORE}",
         )
 
         while self._running:

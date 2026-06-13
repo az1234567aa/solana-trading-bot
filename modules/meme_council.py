@@ -1,7 +1,18 @@
 """
-Meme Council — rule-based multi-agent gate (HERMES-style, zero LLM credits).
+HERMES Meme Council — 7 rule-based agents (zero LLM credits).
 
-Five agents vote before any scanner/copy buy. Default: 4/5 must approve.
+Mirrors the futures HERMES engine: multiple agents vote, then HEPHAESTUS
+validates execution. Default: 5/7 must approve, zero rejects.
+
+Agents:
+  GUARD    — RugCheck, loss cooldown, repeat losers
+  DEPTH    — liquidity, mcap, graduated pool
+  FLOW     — buy pressure / volume
+  SOCIAL   — Twitter + DexScreener socials
+  WHALE    — holder concentration (top1 / top5)
+  HYDRA    — scanner score + daily trade budget
+  ROUTE    — Jupiter sell route (honeypot guard)
+  HEPHAESTUS — execution preflight (not a voter)
 """
 from __future__ import annotations
 
@@ -12,17 +23,22 @@ from typing import Any
 
 from config import (
     COPY_REBUY_COOLDOWN_HOURS,
-    SCAN_MIN_LIQUIDITY_USD,
+    MEME_COUNCIL_MIN,
     SCAN_MIN_MCAP_USD,
+    SCAN_MIN_SCORE,
     SCAN_MAX_MCAP_USD,
+    SCAN_MIN_LIQUIDITY_USD,
     SCAN_PUMPFUN_ALLOW_BONDING,
     SCAN_PUMPFUN_BONDING_MIN_PCT,
     SCAN_PUMPFUN_MIN_USD_MCAP,
+    WHALE_MAX_TOP1_PCT,
+    WHALE_MAX_TOP5_PCT,
 )
 
 logger = logging.getLogger("solana-bot.council")
 
 GRADUATED_DEXES = {"raydium", "orca", "meteora", "pumpswap"}
+COUNCIL_SIZE = 7
 
 
 class Vote(str, Enum):
@@ -46,12 +62,8 @@ class CouncilResult:
     votes: list[AgentVote] = field(default_factory=list)
 
     def summary_lines(self) -> list[str]:
-        icons = {
-            Vote.APPROVE: "✅",
-            Vote.REJECT: "❌",
-            Vote.ABSTAIN: "⏭",
-        }
-        lines = [f"<b>🛡️ Meme Council {self.score}</b>"]
+        icons = {Vote.APPROVE: "✅", Vote.REJECT: "❌", Vote.ABSTAIN: "⏭"}
+        lines = [f"<b>🛡️ HERMES Council {self.score}</b>"]
         for v in self.votes:
             lines.append(f"{icons[v.vote]} <b>{v.name}</b> — {v.reason}")
         return lines
@@ -72,27 +84,37 @@ class TokenCandidate:
     sell_route_ok: bool = True
     on_loss_cooldown: bool = False
     prior_losses: int = 0
+    top_holder_pct: float = 0.0
+    top5_holder_pct: float = 0.0
+    mint_renounced: bool = True
+    freeze_safe: bool = True
+    daily_budget_ok: bool = True
+    trader_name: str | None = None
 
 
 def _guard(candidate: TokenCandidate) -> AgentVote:
     if candidate.on_loss_cooldown:
         return AgentVote(
             "GUARD", "GRD", Vote.REJECT,
-            f"loss cooldown ({COPY_REBUY_COOLDOWN_HOURS}h) — traded before",
+            f"loss cooldown ({COPY_REBUY_COOLDOWN_HOURS}h)",
         )
     if candidate.prior_losses >= 2:
         return AgentVote(
             "GUARD", "GRD", Vote.REJECT,
-            f"burned {candidate.prior_losses}x before on this mint",
+            f"burned {candidate.prior_losses}x on this mint",
         )
     if not candidate.rugcheck_ok:
         return AgentVote(
             "GUARD", "GRD", Vote.REJECT,
             f"RugCheck fail (score {candidate.rugcheck_score:.0f})",
         )
+    if not candidate.mint_renounced:
+        return AgentVote("GUARD", "GRD", Vote.REJECT, "mint authority not renounced")
+    if not candidate.freeze_safe:
+        return AgentVote("GUARD", "GRD", Vote.REJECT, "freeze authority active")
     return AgentVote(
         "GUARD", "GRD", Vote.APPROVE,
-        f"RugCheck ok (score {candidate.rugcheck_score:.0f})",
+        f"RugCheck ok ({candidate.rugcheck_score:.0f}) · mint safe",
     )
 
 
@@ -108,11 +130,11 @@ def _depth(candidate: TokenCandidate) -> AgentVote:
         if progress >= SCAN_PUMPFUN_BONDING_MIN_PCT and mcap >= SCAN_PUMPFUN_MIN_USD_MCAP * 0.5:
             return AgentVote(
                 "DEPTH", "DEP", Vote.APPROVE,
-                f"pump.fun graduating {progress:.0f}% | mcap ${mcap:,.0f}",
+                f"pump graduating {progress:.0f}% | mcap ${mcap:,.0f}",
             )
         return AgentVote(
             "DEPTH", "DEP", Vote.REJECT,
-            f"pump bonding too early ({progress:.0f}% / need {SCAN_PUMPFUN_BONDING_MIN_PCT:.0f}%)",
+            f"pump too early ({progress:.0f}% / need {SCAN_PUMPFUN_BONDING_MIN_PCT:.0f}%)",
         )
 
     if liq < SCAN_MIN_LIQUIDITY_USD:
@@ -153,10 +175,9 @@ def _flow(candidate: TokenCandidate) -> AgentVote:
             "FLOW", "FLW", Vote.REJECT,
             f"sell-heavy {pressure:.0f}% buy pressure",
         )
-    return AgentVote(
-        "FLOW", "FLW", Vote.ABSTAIN,
-        f"neutral flow {pressure:.0f}%",
-    )
+    if candidate.source == "copy":
+        return AgentVote("FLOW", "FLW", Vote.APPROVE, "copy trade — flow skipped")
+    return AgentVote("FLOW", "FLW", Vote.ABSTAIN, f"neutral flow {pressure:.0f}%")
 
 
 def _social(candidate: TokenCandidate) -> AgentVote:
@@ -167,10 +188,9 @@ def _social(candidate: TokenCandidate) -> AgentVote:
     mentions = candidate.twitter_mentions
 
     if mentions >= 3:
-        return AgentVote(
-            "SOCIAL", "SOC", Vote.APPROVE,
-            f"{mentions} Twitter mentions",
-        )
+        return AgentVote("SOCIAL", "SOC", Vote.APPROVE, f"{mentions} Twitter mentions")
+    if candidate.source in ("copy", "twitter") and mentions >= 1:
+        return AgentVote("SOCIAL", "SOC", Vote.APPROVE, "caller / copy signal")
     if has_social and candidate.score >= 70:
         return AgentVote("SOCIAL", "SOC", Vote.APPROVE, "DexScreener socials listed")
     if mentions == 0 and not has_social:
@@ -178,34 +198,93 @@ def _social(candidate: TokenCandidate) -> AgentVote:
     return AgentVote("SOCIAL", "SOC", Vote.APPROVE, "weak but present socials")
 
 
+def _whale(candidate: TokenCandidate) -> AgentVote:
+    top1 = candidate.top_holder_pct
+    top5 = candidate.top5_holder_pct
+    if top1 <= 0 and top5 <= 0:
+        if candidate.source == "copy":
+            return AgentVote("WHALE", "WHL", Vote.ABSTAIN, "holder data n/a — copy vetted")
+        return AgentVote("WHALE", "WHL", Vote.ABSTAIN, "holder data unavailable")
+    if top1 > WHALE_MAX_TOP1_PCT:
+        return AgentVote(
+            "WHALE", "WHL", Vote.REJECT,
+            f"top holder {top1:.1f}% > {WHALE_MAX_TOP1_PCT:.0f}%",
+        )
+    if top5 > WHALE_MAX_TOP5_PCT:
+        return AgentVote(
+            "WHALE", "WHL", Vote.REJECT,
+            f"top 5 hold {top5:.1f}% > {WHALE_MAX_TOP5_PCT:.0f}%",
+        )
+    return AgentVote(
+        "WHALE", "WHL", Vote.APPROVE,
+        f"top1 {top1:.1f}% · top5 {top5:.1f}%",
+    )
+
+
+def _hydra(candidate: TokenCandidate) -> AgentVote:
+    if not candidate.daily_budget_ok:
+        return AgentVote("HYDRA", "HYD", Vote.REJECT, "daily loss/profit limit or max buys hit")
+    if candidate.source == "copy" and candidate.trader_name:
+        return AgentVote(
+            "HYDRA", "HYD", Vote.APPROVE,
+            f"copy budget ok — {candidate.trader_name}",
+        )
+    if candidate.source == "twitter":
+        return AgentVote("HYDRA", "HYD", Vote.APPROVE, "Twitter signal — budget ok")
+    if candidate.score >= SCAN_MIN_SCORE:
+        return AgentVote(
+            "HYDRA", "HYD", Vote.APPROVE,
+            f"score {candidate.score:.0f} ≥ {SCAN_MIN_SCORE}",
+        )
+    return AgentVote(
+        "HYDRA", "HYD", Vote.REJECT,
+        f"score {candidate.score:.0f} < {SCAN_MIN_SCORE}",
+    )
+
+
 def _route(candidate: TokenCandidate) -> AgentVote:
     if not candidate.sell_route_ok:
-        return AgentVote(
-            "ROUTE", "RTE", Vote.REJECT,
-            "no Jupiter sell route (honeypot risk)",
-        )
+        return AgentVote("ROUTE", "RTE", Vote.REJECT, "no Jupiter sell route (honeypot risk)")
     return AgentVote("ROUTE", "RTE", Vote.APPROVE, "sell route verified")
 
 
-def evaluate(candidate: TokenCandidate, min_approve: int = 4) -> CouncilResult:
+def _hephaestus(candidate: TokenCandidate) -> AgentVote:
+    """Execution preflight — must pass after council consensus."""
+    if not candidate.sell_route_ok:
+        return AgentVote("HEPHAESTUS", "HPH", Vote.REJECT, "no sell route for execution")
+    if not candidate.daily_budget_ok:
+        return AgentVote("HEPHAESTUS", "HPH", Vote.REJECT, "risk manager blocked new buys")
+    return AgentVote("HEPHAESTUS", "HPH", Vote.APPROVE, "execution route clear")
+
+
+def evaluate(candidate: TokenCandidate, min_approve: int | None = None) -> CouncilResult:
+    needed = min_approve if min_approve is not None else MEME_COUNCIL_MIN
     votes = [
         _guard(candidate),
         _depth(candidate),
         _flow(candidate),
         _social(candidate),
+        _whale(candidate),
+        _hydra(candidate),
         _route(candidate),
     ]
     approve = sum(1 for v in votes if v.vote == Vote.APPROVE)
     reject = sum(1 for v in votes if v.vote == Vote.REJECT)
-    approved = approve >= min_approve and reject == 0
-    score = f"{approve}/5"
 
+    approved = approve >= needed and reject == 0
+    if approved:
+        preflight = _hephaestus(candidate)
+        votes.append(preflight)
+        if preflight.vote == Vote.REJECT:
+            approved = False
+
+    score = f"{approve}/{COUNCIL_SIZE}"
     icons = " ".join(
         "✅" if v.vote == Vote.APPROVE else "❌" if v.vote == Vote.REJECT else "⏭"
-        for v in votes
+        for v in votes[:COUNCIL_SIZE]
     )
     logger.info(
-        "Council %s %s — %s (%s) %s",
+        "HERMES %s %s — %s (%s) %s",
         score, "FIRE" if approved else "SKIP",
         candidate.symbol, candidate.source, icons,
     )

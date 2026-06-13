@@ -15,9 +15,12 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from config import (
+    AUTO_BUY,
+    COPY_BUY_SLIPPAGE_BPS,
     DEXSCREENER_TOKEN_URL,
     DEXSCREENER_SEARCH_URL,
-    RUGCHECK_URL,
+    SELL_SLIPPAGE_BPS,
+    SOL_MINT,
     TWITTER_AUTO_BUY,
     TWITTER_BEARER_TOKEN,
     TWITTER_CALLERS,
@@ -26,9 +29,13 @@ from config import (
     TWITTER_STATS_DAYS,
     TWITTER_STATS_INTERVAL_HOURS,
     TWITTER_TRACKER_ENABLED,
+    TWITTER_USE_COUNCIL,
     TWITTER_USER_LOOKUP_URL,
     TWITTER_USER_TWEETS_URL,
 )
+from modules.council_gate import council_gate
+from modules.rugcheck_client import fetch_rug_report
+from modules.utils import sol_to_lamports
 from modules import pumpfun
 from modules.twitter_calls import CallLedger, CallRecord
 from modules.utils import fetch_json
@@ -213,21 +220,6 @@ class TwitterTracker:
         except Exception:
             return None
 
-    async def _rugcheck_ok(self, mint: str) -> tuple[bool, float]:
-        try:
-            url = RUGCHECK_URL.format(mint=mint)
-            data = await fetch_json(self.session, "GET", url, label=f"RugCheck {mint[:8]}")
-            score = float(data.get("score", 0) or 0)
-            risks = data.get("risks", []) or []
-            bad = any(
-                "honeypot" in str(r.get("name", "")).lower()
-                or "cannot sell" in str(r.get("description", "")).lower()
-                for r in risks
-            )
-            return not (data.get("rugged") or bad or score > 500), score
-        except Exception:
-            return False, 999.0
-
     async def _resolve_mint(self, mints: list[str], symbols: list[str]) -> tuple[str, str, dict[str, Any]]:
         """Pick best mint + symbol with market data."""
         for mint in mints:
@@ -274,7 +266,8 @@ class TwitterTracker:
             logger.info("Twitter skip — no token data for @%s tweet %s", caller, tweet_id[:8])
             return
 
-        rug_ok, rug_score = await self._rugcheck_ok(mint)
+        rug = await fetch_rug_report(self.session, mint)
+        rug_ok, rug_score = rug.ok, rug.score
         mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
         liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
         pump_meta = pair.get("pumpfun") or {}
@@ -323,14 +316,54 @@ class TwitterTracker:
 
         if TWITTER_AUTO_BUY and self.executor and rug_ok:
             can, skip = await self.executor.can_trade(mint)
-            if can:
+            if not can:
+                return
+            sell_ok = False
+            try:
                 buy_sol = await self.executor.calc_buy_size_sol()
-                await self.executor.buy_token(
-                    mint=mint,
-                    amount_sol=buy_sol,
-                    reason=f"Twitter call @{caller}",
-                    symbol=symbol,
+                buy_quote = await self.executor.get_quote(
+                    SOL_MINT, mint, sol_to_lamports(buy_sol),
                 )
+                test_amount = max(int(buy_quote.get("outAmount", 0)) // 10, 1)
+                sell_quote, _ = await self.executor._get_exit_quote(mint, test_amount, 1000)
+                sell_ok = bool(sell_quote and int(sell_quote.get("outAmount", 0)) > 0)
+            except Exception:
+                sell_ok = False
+            if not sell_ok:
+                logger.info("Twitter auto-buy skip %s — no sell route", symbol)
+                return
+            rm = self.executor.risk_manager
+            daily_ok = True
+            if rm:
+                daily_ok, _ = await rm.can_open_new_trade()
+            if TWITTER_USE_COUNCIL:
+                approved, council, _ = await council_gate(
+                    self.session,
+                    mint=mint,
+                    symbol=symbol,
+                    pair=pair or {},
+                    source="twitter",
+                    sell_route_ok=sell_ok,
+                    score=75.0,
+                    twitter_mentions=1,
+                    rug=await fetch_rug_report(self.session, mint),
+                    daily_budget_ok=daily_ok,
+                    trader_name=f"@{caller}",
+                )
+                if not approved:
+                    logger.info(
+                        "Twitter auto-buy skip %s — HERMES %s",
+                        symbol, council.score if council else "?",
+                    )
+                    return
+            buy_sol = await self.executor.calc_buy_size_sol()
+            await self.executor.buy_token(
+                mint=mint,
+                amount_sol=buy_sol,
+                reason=f"Twitter call @{caller}",
+                symbol=symbol,
+                slippage_bps=COPY_BUY_SLIPPAGE_BPS,
+            )
 
     async def _process_tweet(self, tweet: dict[str, Any], caller: str) -> None:
         tweet_id = tweet.get("id", "")

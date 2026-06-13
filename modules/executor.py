@@ -17,7 +17,9 @@ from solders.transaction import VersionedTransaction
 import config
 from config import (
     BUY_MINT_COOLDOWN_SEC,
+    BUY_PRIORITY_FEE_LAMPORTS,
     BUY_SIZE_PCT_OF_WALLET,
+    BUY_SLIPPAGE_BPS,
     DEFAULT_SLIPPAGE_BPS,
     HELIUS_RPC_URL,
     MAX_BUY_SOL,
@@ -489,6 +491,7 @@ class Executor:
         reason: str,
         symbol: str = "UNKNOWN",
         score_breakdown: dict[str, Any] | None = None,
+        slippage_bps: int | None = None,
     ) -> BuyResult:
         logger.info("BUY signal — %s (%s) for %.4f SOL — %s", symbol, mint[:8], amount_sol, reason)
 
@@ -512,9 +515,10 @@ class Executor:
 
         self._buy_in_flight.add(mint)
         lamports = sol_to_lamports(amount_sol)
+        slip = slippage_bps if slippage_bps is not None else BUY_SLIPPAGE_BPS
 
         try:
-            quote = await self.get_quote(SOL_MINT, mint, lamports)
+            quote = await self.get_quote(SOL_MINT, mint, lamports, slippage_bps=slip)
             out_amount = int(quote.get("outAmount", 0))
             quote_decimals = quote.get("outDecimals")
             out_decimals = int(quote_decimals) if quote_decimals is not None else (
@@ -529,7 +533,7 @@ class Executor:
             else:
                 token_price = await self.get_token_price_usd(mint) or 0.0
 
-            tx_sig = await self.execute_swap(quote)
+            tx_sig = await self.execute_swap(quote, priority_fee=BUY_PRIORITY_FEE_LAMPORTS)
 
             result = BuyResult(
                 success=True,

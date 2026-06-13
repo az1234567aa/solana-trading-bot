@@ -8,9 +8,12 @@ from typing import Any
 import aiohttp
 
 from config import (
+    ALERTS_ONLY,
+    AUTO_BUY,
     DAILY_LOSS_LIMIT_USD,
     DAILY_PROFIT_TARGET_USD,
     MAX_BUYS_PER_DAY,
+    COPY_COUNCIL_MIN,
     MEME_COUNCIL_MIN,
     PAPER_TRADE,
     TELEGRAM_BOT_TOKEN,
@@ -147,6 +150,8 @@ class Alerter:
         lines = [
             "<b>Solana Bot started</b>",
         ]
+        if ALERTS_ONLY or not AUTO_BUY:
+            lines.append("• Mode: <b>🔔 ALERTS ONLY</b> — HERMES signals, no auto-buy")
         if PAPER_TRADE:
             lines.append("• Mode: <b>📝 PAPER TRADE</b> (simulated — no real txs)")
             lines.append("• Paper PnL = tracked price only (not Jupiter quotes)")
@@ -163,8 +168,8 @@ class Alerter:
                 if TWITTER_TRACKER_ENABLED
                 else ""
             ),
-            f"• Meme Council: <b>{'ON' if USE_MEME_COUNCIL else 'OFF'}</b>"
-            + (f" ({MEME_COUNCIL_MIN}/5 agents must agree)" if USE_MEME_COUNCIL else ""),
+            f"• HERMES Council: <b>{'ON' if USE_MEME_COUNCIL else 'OFF'}</b>"
+            + (f" ({MEME_COUNCIL_MIN}/7 HERMES · copy {COPY_COUNCIL_MIN}/7)" if USE_MEME_COUNCIL else ""),
             "• Every buy + sell → Telegram + trade log",
             "• Sells → <b>USDC</b> with running PnL totals",
         ])
@@ -174,6 +179,35 @@ class Alerter:
                 f"• Tracked history: {lifetime_trades} trades, "
                 f"{sign}{format_usd(lifetime_pnl)} all-time"
             )
+        await self.send_message("\n".join(lines))
+
+    async def send_hermes_signal(
+        self,
+        *,
+        symbol: str,
+        mint: str,
+        source: str,
+        score: float,
+        council_result,
+        reason: str,
+        mcap_usd: float = 0,
+        liq_usd: float = 0,
+    ) -> None:
+        """HERMES council passed — alert user without buying (alerts-only mode)."""
+        lines = [
+            f"<b>🛡️ HERMES SIGNAL — {symbol}</b>",
+            f"<b>Source:</b> {source}",
+            f"<b>Score:</b> {score:.0f}/100",
+            f"<b>Why:</b> {reason}",
+        ]
+        if mcap_usd:
+            lines.append(f"<b>Mcap:</b> ${mcap_usd:,.0f}")
+        if liq_usd:
+            lines.append(f"<b>Liq:</b> ${liq_usd:,.0f}")
+        if council_result:
+            lines.extend(council_result.summary_lines())
+        lines.append(f"<b>Mint:</b> <code>{mint}</code>")
+        lines.append("<i>Alerts-only — buy manually in Phantom if you like the setup.</i>")
         await self.send_message("\n".join(lines))
 
     async def send_twitter_call_alert(

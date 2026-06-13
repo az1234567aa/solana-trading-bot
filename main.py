@@ -7,6 +7,7 @@ import signal
 import aiohttp
 
 import config
+from config import AUTO_BUY, ENABLE_SCANNER
 from modules.alerter import Alerter
 from modules.coin_scanner import CoinScanner
 from modules.executor import Executor
@@ -22,12 +23,22 @@ async def main() -> None:
     setup_logging()
 
     mode = "PAPER TRADE" if config.PAPER_TRADE else "LIVE TRADING"
+    if config.ALERTS_ONLY or not AUTO_BUY:
+        mode += " · ALERTS ONLY (no auto-buy)"
     logger.info("=" * 60)
     logger.info("Solana Memecoin Trading Bot starting — %s", mode)
-    if config.ENABLE_COPY_TRADING and config.TRADERS:
+    if config.ENABLE_COPY_TRADING and config.TRADERS and AUTO_BUY:
         logger.info("Copy trading ON — %d wallets", len(config.TRADERS))
+    elif config.ENABLE_COPY_TRADING and not AUTO_BUY:
+        logger.info("Copy trading OFF — AUTO_BUY disabled")
     else:
-        logger.info("Copy trading OFF — GMGN handles copies; bot scans market")
+        logger.info("Copy trading OFF — scanner + Twitter only")
+    logger.info(
+        "Scanner: %s | HERMES council: %s | Auto-buy: %s",
+        "ON" if ENABLE_SCANNER else "OFF",
+        "ON" if config.USE_MEME_COUNCIL else "OFF",
+        "ON" if AUTO_BUY else "OFF (alerts only)",
+    )
     logger.info("Scanner interval: %ds", config.SCAN_INTERVAL_SECONDS)
     logger.info("=" * 60)
 
@@ -55,10 +66,10 @@ async def main() -> None:
         await risk_manager.initialize()   # connects to PostgreSQL, loads open positions
         executor.risk_manager = risk_manager
 
-        coin_scanner = CoinScanner(session, executor)
+        coin_scanner = CoinScanner(session, executor) if ENABLE_SCANNER else None
         wallet_tracker = (
             WalletTracker(session, executor)
-            if config.ENABLE_COPY_TRADING and config.TRADERS else None
+            if config.ENABLE_COPY_TRADING and config.TRADERS and AUTO_BUY else None
         )
         twitter_tracker = TwitterTracker(session, alerter, executor)
 
@@ -75,7 +86,8 @@ async def main() -> None:
             shutdown_event.set()
             if wallet_tracker:
                 wallet_tracker.stop()
-            coin_scanner.stop()
+            if coin_scanner:
+                coin_scanner.stop()
             twitter_tracker.stop()
             risk_manager.stop()
 
@@ -88,7 +100,9 @@ async def main() -> None:
 
         logger.info("All modules running concurrently via asyncio.gather()")
 
-        tasks = [coin_scanner.run(), risk_manager.run(), twitter_tracker.run(), _run_until_shutdown()]
+        tasks = [risk_manager.run(), twitter_tracker.run(), _run_until_shutdown()]
+        if coin_scanner:
+            tasks.insert(0, coin_scanner.run())
         if wallet_tracker:
             tasks.insert(0, wallet_tracker.run())
 

@@ -7,17 +7,18 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from config import (
+    CASH_MINT,
     COPY_GRADUATED_ONLY,
     COPY_MAX_MARKET_CAP_USD,
     COPY_MAX_TRADER_SOL,
     COPY_MIN_GRADUATED_LIQUIDITY_USD,
     COPY_MIN_TRADER_SOL,
     COPY_SKIP_IF_HOLDING,
+    COPY_USE_COUNCIL,
+    COPY_BUY_SLIPPAGE_BPS,
     DEXSCREENER_TOKEN_URL,
     HELIUS_API_KEY,
     HELIUS_TX_URL,
-    RUGCHECK_URL,
-    CASH_MINT,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
     TRADER_BY_ADDRESS,
@@ -25,6 +26,8 @@ from config import (
     USDC_MINT,
     WALLET_POLL_INTERVAL_SECONDS,
 )
+from modules.council_gate import council_gate
+from modules.rugcheck_client import fetch_rug_report
 from modules.utils import fetch_json, lamports_to_sol, sol_to_lamports
 
 if TYPE_CHECKING:
@@ -151,24 +154,6 @@ class WalletTracker:
         graduated_dexes = {"raydium", "orca", "meteora", "pumpswap"}
         return dex in graduated_dexes and liq >= COPY_MIN_GRADUATED_LIQUIDITY_USD
 
-    async def _rugcheck_ok(self, mint: str) -> bool:
-        try:
-            url = RUGCHECK_URL.format(mint=mint)
-            data = await fetch_json(self.session, "GET", url, label=f"RugCheck {mint[:8]}")
-            score = float(data.get("score", 0) or 0)
-            risks = data.get("risks", []) or []
-            is_honeypot = any(
-                "honeypot" in str(r.get("name", "")).lower()
-                or "cannot sell" in str(r.get("description", "")).lower()
-                for r in risks
-            )
-            if data.get("rugged") or is_honeypot or score > 500:
-                return False
-            return True
-        except Exception:
-            logger.info("Skipping %s — RugCheck unavailable", mint[:8])
-            return False
-
     def _already_holding(self, mint: str) -> bool:
         rm = self.executor.risk_manager
         return rm.is_holding(mint) if rm else False
@@ -228,10 +213,6 @@ class WalletTracker:
             logger.info("Skipping %s — already holding", symbol)
             return
 
-        if not await self._rugcheck_ok(mint):
-            logger.info("Skipping %s — RugCheck failed (honeypot/rug/high risk)", symbol)
-            return
-
         market_cap = await self._get_market_cap(mint)
         if market_cap and market_cap > COPY_MAX_MARKET_CAP_USD:
             logger.info(
@@ -241,7 +222,12 @@ class WalletTracker:
             )
             return
 
-        # Verify we can sell to Phantom Cash or USDC before copying
+        pair = await self._get_best_pair(mint) or {}
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        dex = (pair.get("dexId") or "?") if pair else "?"
+
+        # Verify Jupiter sell route before council
+        sell_ok = False
         try:
             buy_quote = await self.executor.get_quote(
                 SOL_MINT, mint, sol_to_lamports(trader.copy_amount_sol),
@@ -250,16 +236,47 @@ class WalletTracker:
             sell_quote, _ = await self.executor._get_exit_quote(
                 mint, test_amount, SELL_SLIPPAGE_BPS,
             )
-            if not sell_quote or int(sell_quote.get("outAmount", 0)) <= 0:
+            sell_ok = bool(sell_quote and int(sell_quote.get("outAmount", 0)) > 0)
+            if not sell_ok:
                 logger.info("Skipping %s — Jupiter sell route failed (unsellable)", symbol)
                 return
         except Exception:
             logger.info("Skipping %s — could not verify sell route", symbol)
             return
 
-        pair = await self._get_best_pair(mint)
-        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0) if pair else 0
-        dex = (pair.get("dexId") or "?") if pair else "?"
+        rm = self.executor.risk_manager
+        daily_ok = True
+        if rm:
+            daily_ok, _ = await rm.can_open_new_trade()
+
+        council = None
+        rug = await fetch_rug_report(self.session, mint)
+        if COPY_USE_COUNCIL:
+            approved, council, rug = await council_gate(
+                self.session,
+                mint=mint,
+                symbol=symbol,
+                pair=pair,
+                source="copy",
+                sell_route_ok=sell_ok,
+                score=80.0,
+                breakdown={"trader": trader.name},
+                rug=rug,
+                on_loss_cooldown=rm.on_cooldown(mint) if rm else False,
+                prior_losses=rm.prior_loss_count(mint) if rm else 0,
+                daily_budget_ok=daily_ok,
+                trader_name=trader.name,
+            )
+            if not approved:
+                logger.info(
+                    "Copy skip %s — HERMES Council %s rejected",
+                    symbol, council.score if council else "?",
+                )
+                return
+        elif not rug.ok:
+            logger.info("Skipping %s — RugCheck failed", symbol)
+            return
+
         mcap_str = f"${market_cap:,.0f}" if market_cap else "unknown"
         breakdown = {
             "market_cap": mcap_str,
@@ -267,6 +284,7 @@ class WalletTracker:
             "dex": dex,
             "trader": f"{trader.name} ({trader.handle})",
             "trader_spent": f"{sol_spent:.3f} SOL",
+            "council": council.score if council else "legacy",
         }
         buy_sol = await self.executor.calc_buy_size_sol()
         reason = f"Copy {trader.name} — bought {symbol}"
@@ -276,6 +294,7 @@ class WalletTracker:
             reason=reason,
             symbol=symbol,
             score_breakdown=breakdown,
+            slippage_bps=COPY_BUY_SLIPPAGE_BPS,
         )
 
     async def _poll_wallet(self, trader_address: str) -> None:
@@ -328,13 +347,12 @@ class WalletTracker:
         )
 
         while self._running:
-            for trader in TRADERS:
-                if not self._running:
-                    break
-                await self._poll_wallet(trader.address)
-                await asyncio.sleep(5.0)  # 8 wallets × 5s = 40s per cycle
-            # rest after full cycle — total ~70s between full sweeps
-            await asyncio.sleep(30.0)
+            # Poll all wallets in parallel — fastest copy path
+            await asyncio.gather(
+                *[self._poll_wallet(trader.address) for trader in TRADERS],
+                return_exceptions=True,
+            )
+            await asyncio.sleep(WALLET_POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:
         self._running = False

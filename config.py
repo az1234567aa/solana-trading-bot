@@ -26,8 +26,15 @@ class TraderConfig:
     copy_amount_sol: float
 
 
+# Mode — ALERTS_ONLY disables all auto-buys (Telegram signals only)
+ALERTS_ONLY = os.getenv("ALERTS_ONLY", "false").lower() in ("true", "1", "yes")
+AUTO_BUY = os.getenv("AUTO_BUY", "false" if ALERTS_ONLY else "true").lower() in ("true", "1", "yes")
+
 # Copy best GMGN-vetted traders + autonomous market scanner (both run together)
-ENABLE_COPY_TRADING = True
+ENABLE_COPY_TRADING = os.getenv(
+    "ENABLE_COPY_TRADING", "false" if ALERTS_ONLY else "true",
+).lower() in ("true", "1", "yes")
+ENABLE_SCANNER = os.getenv("ENABLE_SCANNER", "true").lower() in ("true", "1", "yes")
 COPY_BUY_SOL = 0.015  # fallback cap — actual size is wallet-based (see BUY_SIZE_*)
 
 TRADERS: list[TraderConfig] = [
@@ -103,8 +110,8 @@ MAX_BUY_SOL            = 0.015    # never risk more than this per trade (~$2)
 BUY_SIZE_PCT_OF_WALLET = 0.08     # each buy = 8% of tradeable SOL
 
 # Scanner settings — autonomous discovery (Axiom Pulse "graduated" style)
-SCAN_INTERVAL_SECONDS  = 30       # slower scan = fewer impulse buys
-SCAN_MIN_SCORE         = 72       # only strong setups (was 62)
+SCAN_INTERVAL_SECONDS  = int(os.getenv("SCAN_INTERVAL_SECONDS", "15"))
+SCAN_MIN_SCORE         = int(os.getenv("SCAN_MIN_SCORE", "70"))
 SCAN_MIN_LIQUIDITY_USD = 15_000   # graduated pool minimum
 SCAN_MIN_MCAP_USD      = 25_000   # skip micro-dead coins
 SCAN_MAX_MCAP_USD      = 600_000  # memecoin sweet spot
@@ -125,8 +132,9 @@ SCAN_PUMPFUN_MAX_AGE_HOURS   = 6.0    # only fresh pump launches
 PUMP_INITIAL_VIRTUAL_SOL     = 30.0   # pump.fun curve starts ~30 virtual SOL
 PUMP_BONDING_SOL_TARGET      = 85.0   # graduation threshold (~85 SOL)
 
-# Wallet tracker settings
-WALLET_POLL_INTERVAL_SECONDS = 20  # 8 wallets × 1s gap = ~28s per full cycle, stays under free tier
+# Wallet tracker — parallel poll; lower = faster copy (Helius free tier OK at 12s)
+WALLET_POLL_INTERVAL_SECONDS = int(os.getenv("WALLET_POLL_INTERVAL_SECONDS", "12"))
+WALLET_POLL_GAP_SECONDS = float(os.getenv("WALLET_POLL_GAP_SECONDS", "0.5"))
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5
@@ -143,9 +151,14 @@ TIME_STOP_MINUTES = 15        # flat for 15 min → sell
 TIME_STOP_MIN_MULTIPLIER = 1.1  # needs 1.1x in 15 min or exit
 MAX_HOLD_MINUTES = 45         # never hold longer than 45 min — force sell
 
-# Meme Council — multi-agent buy gate (rule-based, no LLM)
+# HERMES Meme Council — 7 rule-based agents (zero LLM credits)
 USE_MEME_COUNCIL = os.getenv("USE_MEME_COUNCIL", "true").lower() in ("true", "1", "yes")
-MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "4"))  # 4/5 agents must approve
+MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "4"))  # 4/7 — fast but still gated
+COPY_COUNCIL_MIN = int(os.getenv("COPY_COUNCIL_MIN", "4"))  # copy trades: speed priority
+COPY_USE_COUNCIL = os.getenv("COPY_USE_COUNCIL", "true").lower() in ("true", "1", "yes")
+TWITTER_USE_COUNCIL = os.getenv("TWITTER_USE_COUNCIL", "true").lower() in ("true", "1", "yes")
+WHALE_MAX_TOP1_PCT = float(os.getenv("WHALE_MAX_TOP1_PCT", "25"))
+WHALE_MAX_TOP5_PCT = float(os.getenv("WHALE_MAX_TOP5_PCT", "55"))
 
 # Optional extra scan feeds (leave blank to skip)
 DEXTOOLS_API_KEY: str = os.getenv("DEXTOOLS_API_KEY", "")
@@ -155,7 +168,7 @@ AXIOM_AUTH_TOKEN: str = os.getenv("AXIOM_AUTH_TOKEN", "")
 TWITTER_TRACKER_ENABLED = os.getenv("ENABLE_TWITTER_TRACKER", "true").lower() in ("true", "1", "yes")
 TWITTER_POLL_SECONDS = int(os.getenv("TWITTER_POLL_SECONDS", "90"))
 TWITTER_KEYWORD_SEARCH = os.getenv("TWITTER_KEYWORD_SEARCH", "true").lower() in ("true", "1", "yes")
-TWITTER_AUTO_BUY = os.getenv("TWITTER_AUTO_BUY", "false").lower() in ("true", "1", "yes")
+TWITTER_AUTO_BUY = os.getenv("TWITTER_AUTO_BUY", "true").lower() in ("true", "1", "yes")
 TWITTER_STATS_DAYS = int(os.getenv("TWITTER_STATS_DAYS", "30"))
 TWITTER_STATS_INTERVAL_HOURS = int(os.getenv("TWITTER_STATS_INTERVAL_HOURS", "24"))
 
@@ -173,10 +186,13 @@ RESET_TRADE_STATS = os.getenv("RESET_TRADE_STATS", "false").lower() in ("true", 
 # General
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.5
-JUPITER_MIN_INTERVAL_SEC = 1.5       # min gap between Jupiter quote/swap calls
+JUPITER_MIN_INTERVAL_SEC = float(os.getenv("JUPITER_MIN_INTERVAL_SEC", "0.8"))
 JUPITER_429_RETRIES = 5              # extra retries when rate-limited
-BUY_MINT_COOLDOWN_SEC = 300          # don't buy same token again within 5 min
-DEFAULT_SLIPPAGE_BPS = 300
+BUY_MINT_COOLDOWN_SEC = int(os.getenv("BUY_MINT_COOLDOWN_SEC", "180"))
+DEFAULT_SLIPPAGE_BPS = int(os.getenv("DEFAULT_SLIPPAGE_BPS", "300"))
+BUY_SLIPPAGE_BPS = int(os.getenv("BUY_SLIPPAGE_BPS", "500"))          # 5% — faster fills
+COPY_BUY_SLIPPAGE_BPS = int(os.getenv("COPY_BUY_SLIPPAGE_BPS", "800"))  # 8% — copy speed
+BUY_PRIORITY_FEE_LAMPORTS = int(os.getenv("BUY_PRIORITY_FEE_LAMPORTS", "300000"))
 SELL_SLIPPAGE_BPS = 1000          # 10% slippage on sells — meme coins move fast
 SELL_SLIPPAGE_RETRY_BPS = [1000, 2500, 5000, 10000]
 SELL_PRIORITY_FEE_LAMPORTS = 300_000
