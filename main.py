@@ -90,6 +90,7 @@ async def main() -> None:
                 if risk_manager.store._pool is not None
                 else "local file (add DATABASE_URL on Railway)"
             ),
+            wallet_address=executor.public_key,
         )
         logger.info("Wallet: %s", executor.public_key)
 

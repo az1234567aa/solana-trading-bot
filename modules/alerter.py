@@ -24,6 +24,7 @@ from config import (
     TWITTER_CALLERS,
     TWITTER_TRACKER_ENABLED,
 )
+from modules.onchain import is_on_chain_tx, solscan_account_link, solscan_tx_link
 from modules.utils import format_duration, format_usd
 
 logger = logging.getLogger("solana-bot.alerter")
@@ -49,6 +50,8 @@ class TradeAlert:
     buys_today: int = 0
     score_breakdown: dict[str, Any] | None = None
     sol_price_usd: float = 0.0
+    entry_tx: str = ""
+    exit_tx: str = ""
 
 
 class Alerter:
@@ -98,8 +101,10 @@ class Alerter:
             for key, value in score_breakdown.items():
                 lines.append(f"<b>{key.replace('_', ' ').title()}:</b> {value}")
         lines.append(f"<b>Mint:</b> <code>{mint}</code>")
-        if tx_sig:
-            lines.append(f"<b>Tx:</b> <code>{tx_sig}</code>")
+        if tx_sig and is_on_chain_tx(tx_sig):
+            lines.append(f'<a href="{solscan_tx_link(tx_sig)}">✅ Verify buy on Solscan</a>')
+        elif tx_sig:
+            lines.append(f"<b>Tx:</b> <code>{tx_sig}</code> (simulated)")
         await self.send_message("\n".join(lines))
 
     async def send_partial_sell_alert(
@@ -144,6 +149,10 @@ class Alerter:
             f"<b>Hold:</b> {format_duration(hold_seconds)} | <b>Peak:</b> {alert.peak_multiplier:.2f}x",
             f"<b>Mint:</b> <code>{alert.token_mint}</code>",
         ]
+        if is_on_chain_tx(alert.entry_tx):
+            lines.append(f'<a href="{solscan_tx_link(alert.entry_tx)}">Buy tx on Solscan</a>')
+        if is_on_chain_tx(alert.exit_tx):
+            lines.append(f'<a href="{solscan_tx_link(alert.exit_tx)}">Sell tx on Solscan</a>')
         await self.send_message("\n".join(lines))
 
     async def send_startup_message(
@@ -153,6 +162,7 @@ class Alerter:
         *,
         open_positions: list[tuple[str, str]] | None = None,
         persistence: str = "file",
+        wallet_address: str = "",
     ) -> None:
         lines = [
             "<b>Solana Bot started</b>",
@@ -182,7 +192,12 @@ class Alerter:
             + (f" ({MEME_COUNCIL_MIN}/7 HERMES · copy {COPY_COUNCIL_MIN}/7)" if USE_MEME_COUNCIL else ""),
             "• Every buy + sell → Telegram + trade log",
             "• Sells → <b>USDC</b> with running PnL totals",
+            "• Live trades include <b>Solscan links</b> — verify every tx on-chain",
         ])
+        if wallet_address and wallet_address != "PAPER_WALLET":
+            lines.append(
+                f'• Wallet: <a href="{solscan_account_link(wallet_address)}">{wallet_address[:8]}…</a>'
+            )
         if open_positions:
             names = ", ".join(sym for sym, _ in open_positions)
             lines.append(

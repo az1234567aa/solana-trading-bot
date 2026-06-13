@@ -15,6 +15,7 @@ from config import (
     DUST_BALANCE_USD,
     MAX_HOLD_MINUTES,
     MAX_OPEN_POSITIONS,
+    PAPER_TRADE,
     RISK_POLL_INTERVAL_SECONDS,
     SELL_TO_STABLE,
     STOP_LOSS_PCT,
@@ -31,6 +32,7 @@ from config import (
 )
 from modules.alerter import Alerter, TradeAlert
 from modules.bot_state import BotStateStore
+from modules.onchain import is_on_chain_tx, solscan_account_link
 from modules.trade_journal import TradeStats, log_event
 from modules.utils import format_duration
 
@@ -69,6 +71,7 @@ def _pos_to_dict(p: "Position") -> dict:
         "total_sol_received": p.total_sol_received,
         "price_miss_count": p.price_miss_count,
         "sell_fail_count": p.sell_fail_count,
+        "entry_tx_signature": p.entry_tx_signature,
         "partial_exits": [
             {k: str(v) if isinstance(v, datetime) else v for k, v in e.items()}
             for e in p.partial_exits
@@ -101,6 +104,7 @@ def _dict_to_pos(d: dict) -> "Position":
         partial_exits=d.get("partial_exits", []),
         price_miss_count=d.get("price_miss_count", 0),
         sell_fail_count=d.get("sell_fail_count", 0),
+        entry_tx_signature=d.get("entry_tx_signature", ""),
     )
 
 
@@ -250,6 +254,7 @@ class Position:
     partial_exits: list[dict[str, Any]] = field(default_factory=list)
     price_miss_count: int = 0
     sell_fail_count: int = 0
+    entry_tx_signature: str = ""   # required for live — proves on-chain buy
 
 
 # ── Risk Manager ─────────────────────────────────────────────────────────────
@@ -373,11 +378,72 @@ class RiskManager:
         else:
             self._reset_daily_if_needed()
 
+        purged = await self._reconcile_loaded_positions()
+        if purged:
+            logger.info("Purged %d paper/ghost position(s) on live startup", purged)
+
         if self._loss_cooldown:
             logger.info("Restored %d loss cooldown(s)", len(self._loss_cooldown))
         if self.positions:
             symbols = ", ".join(p.symbol for p in self.positions.values() if not p.closed)
             logger.info("Still monitoring open position(s): %s", symbols)
+
+    async def _reset_paper_contaminated_stats(self) -> None:
+        """Live mode — drop PnL from paper trades that never hit the chain."""
+        self.stats = TradeStats()
+        self._daily_pnl_usd = 0.0
+        self._buys_today = 0
+        self._halted_today = False
+        self._halt_reason = ""
+        self._traded_mints = []
+        self._loss_cooldown = {}
+        self._reset_daily_if_needed()
+        await self._persist_stats()
+
+    async def _purge_ghost_position(self, position: Position, reason: str) -> None:
+        """Remove a DB position that was never a real on-chain hold."""
+        position.closed = True
+        position.remaining_tokens = 0
+        await self._persist(position)
+        self.positions.pop(position.position_id, None)
+        logger.warning(
+            "Purged ghost position %s (%s) — %s",
+            position.symbol, position.mint[:8], reason,
+        )
+
+    async def _reconcile_loaded_positions(self) -> int:
+        """Live startup — drop paper positions; sync real ones with wallet."""
+        if PAPER_TRADE:
+            return 0
+
+        purged: list[Position] = []
+        for pos in list(self.positions.values()):
+            if pos.closed:
+                continue
+            if not is_on_chain_tx(pos.entry_tx_signature):
+                purged.append(pos)
+                continue
+            amount, decimals = await self.executor.get_token_balance(pos.mint)
+            if amount > 0:
+                pos.remaining_tokens = amount
+                pos.decimals = decimals
+                await self._persist(pos)
+            elif pos.total_sol_received <= 0 and not pos.partial_exits:
+                purged.append(pos)
+
+        for pos in purged:
+            await self._purge_ghost_position(pos, "no on-chain buy or empty wallet")
+
+        if purged:
+            await self._reset_paper_contaminated_stats()
+            symbols = ", ".join(p.symbol for p in purged)
+            await self.alerter.send_message(
+                "<b>🧹 Cleared paper/fake positions</b>\n"
+                f"Removed: {symbols}\n"
+                "PnL counters reset — live mode only tracks verified on-chain trades.\n"
+                f'<a href="{solscan_account_link(self.executor.public_key)}">View wallet on Solscan</a>'
+            )
+        return len(purged)
 
     async def _persist(self, position: Position) -> None:
         if self.store._pool is not None:
@@ -387,6 +453,13 @@ class RiskManager:
 
     async def open_position(self, buy: "BuyResult") -> None:
         if not buy.success or buy.tokens_received <= 0:
+            return
+
+        if not PAPER_TRADE and not is_on_chain_tx(buy.tx_signature):
+            logger.error(
+                "Refusing to track %s — live buy has no on-chain tx (%s)",
+                buy.symbol, buy.tx_signature,
+            )
             return
 
         sol_price = await self.executor.get_sol_price_usd()
@@ -405,6 +478,7 @@ class RiskManager:
             reason=buy.reason,
             score_breakdown=buy.score_breakdown,
             decimals=buy.decimals,
+            entry_tx_signature=buy.tx_signature or "",
         )
         self.positions[buy.position_id] = position
         self._reset_daily_if_needed()
@@ -480,6 +554,14 @@ class RiskManager:
         if amount > 0:
             position.remaining_tokens = amount
             position.decimals = decimals
+            return
+        if self.executor.paper_trade:
+            return
+        # Live: never zero remaining_tokens just because wallet reads empty —
+        # that caused fake -100% closes on paper positions after redeploy.
+        has_proceeds = position.total_sol_received > 0 or bool(position.partial_exits)
+        if has_proceeds:
+            position.remaining_tokens = 0
 
     async def _sell_partial(self, position: Position, sell_pct: float, exit_reason: str) -> bool:
         await self._sync_wallet_balance(position)
@@ -498,6 +580,15 @@ class RiskManager:
             sell_pct=sell_pct,
         )
         if sell_result.success:
+            if sell_result.is_dust and not self.executor.paper_trade:
+                logger.warning(
+                    "Live sell rejected for %s — dust skip not allowed without on-chain tx",
+                    position.symbol,
+                )
+                position.sell_fail_count += 1
+                await self._persist(position)
+                return False
+
             position.sell_fail_count = 0
             received = sell_result.sol_received
             if sell_result.is_dust:
@@ -533,6 +624,7 @@ class RiskManager:
                 "reason": exit_reason,
                 "tokens": tokens_to_sell,
                 "sol": received,
+                "tx": sell_result.tx_signature or "",
                 "time": datetime.now(timezone.utc),
             })
             await self._persist(position)
@@ -567,14 +659,39 @@ class RiskManager:
         if position.closed:
             return
 
+        if not self.executor.paper_trade:
+            if not is_on_chain_tx(position.entry_tx_signature):
+                await self._purge_ghost_position(position, "no on-chain buy tx")
+                return
+
+        wallet_amt, wallet_dec = await self.executor.get_token_balance(position.mint)
+        if wallet_amt > 0:
+            position.remaining_tokens = wallet_amt
+            position.decimals = wallet_dec
+
         if position.remaining_tokens > 0:
             sold = await self._sell_partial(position, 100.0, exit_reason)
             if not sold:
                 return  # keep position open — sell failed, retry next poll
 
         await self._sync_wallet_balance(position)
-        if position.remaining_tokens > 0.0001:
-            return  # tokens still in wallet after sell attempt
+        wallet_amt, _ = await self.executor.get_token_balance(position.mint)
+
+        if not self.executor.paper_trade:
+            if wallet_amt > 0.0001:
+                return  # tokens still in wallet after sell attempt
+            has_real_exit = (
+                position.total_sol_received > 0
+                or any(is_on_chain_tx(e.get("tx")) for e in position.partial_exits)
+            )
+            if not has_real_exit:
+                logger.warning(
+                    "Refusing fake close %s — no on-chain sell proceeds recorded",
+                    position.symbol,
+                )
+                return
+        elif position.remaining_tokens > 0.0001:
+            return  # paper: tokens still held
 
         position.closed = True
         await self._persist(position)
@@ -620,6 +737,13 @@ class RiskManager:
             lifetime_pnl=round(self.stats.lifetime_pnl_usd, 2),
         )
 
+        exit_tx = ""
+        for partial in reversed(position.partial_exits):
+            tx = partial.get("tx", "")
+            if is_on_chain_tx(tx):
+                exit_tx = tx
+                break
+
         alert = TradeAlert(
             token_mint=position.mint,
             token_symbol=position.symbol,
@@ -639,6 +763,8 @@ class RiskManager:
             buys_today=self._buys_today,
             score_breakdown=position.score_breakdown,
             sol_price_usd=sol_price,
+            entry_tx=position.entry_tx_signature,
+            exit_tx=exit_tx,
         )
         await self.alerter.send_trade_alert(alert)
         if (

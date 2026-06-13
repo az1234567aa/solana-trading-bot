@@ -45,6 +45,7 @@ from config import (
     SOLANA_SEND_RPC_URL,
     WALLET_PRIVATE_KEY,
 )
+from modules.onchain import is_on_chain_tx, solscan_tx_link
 from modules.utils import fetch_json, lamports_to_sol, retry_async, sol_to_lamports
 
 if TYPE_CHECKING:
@@ -533,6 +534,18 @@ class Executor:
 
             tx_sig = await self.execute_swap(quote, priority_fee=BUY_PRIORITY_FEE_LAMPORTS)
 
+            if not self.paper_trade:
+                if not is_on_chain_tx(tx_sig):
+                    raise RuntimeError(f"Live buy returned no on-chain tx: {tx_sig}")
+                await asyncio.sleep(2)
+                wallet_amt, wallet_dec = await self.get_token_balance(mint)
+                if wallet_amt <= 0:
+                    raise RuntimeError(
+                        f"Live buy tx {tx_sig[:16]}… confirmed but wallet has 0 {symbol} tokens"
+                    )
+                tokens_received = wallet_amt
+                out_decimals = wallet_dec
+
             result = BuyResult(
                 success=True,
                 mint=mint,
@@ -630,7 +643,7 @@ class Executor:
             if preview and preview_mint:
                 preview_usd = await self._exit_value_usd(int(preview.get("outAmount", 0)), preview_mint)
                 preview_label = EXIT_LABELS.get(preview_mint, "stable")
-                if preview_usd < MIN_SELL_VALUE_USD:
+                if preview_usd < MIN_SELL_VALUE_USD and self.paper_trade:
                     logger.info(
                         "SELL skip %s — only $%.2f %s (dust, treating as done)",
                         symbol, preview_usd, preview_label,
@@ -639,6 +652,11 @@ class Executor:
                         success=True, mint=mint, symbol=symbol, amount_tokens=amount_tokens,
                         sol_received=0, exit_price_usd=0, tx_signature=None,
                         sell_pct=sell_pct, is_dust=True,
+                    )
+                if preview_usd < MIN_SELL_VALUE_USD:
+                    logger.info(
+                        "SELL %s — quote only $%.2f %s but attempting live swap anyway",
+                        symbol, preview_usd, preview_label,
                     )
         except Exception:
             pass
@@ -662,6 +680,9 @@ class Executor:
                     symbol, slippage, received_usd, exit_label,
                 )
                 tx_sig = await self.execute_swap(quote)
+
+                if not self.paper_trade and not is_on_chain_tx(tx_sig):
+                    raise RuntimeError(f"Live sell returned no on-chain tx: {tx_sig}")
 
                 logger.info(
                     "SELL complete — %s sold %.4f tokens for %.4f %s (tx: %s)",
