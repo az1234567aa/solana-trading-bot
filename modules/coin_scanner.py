@@ -43,6 +43,7 @@ from config import (
     SOL_MINT,
     TWITTER_BEARER_TOKEN,
     TWITTER_SEARCH_URL,
+    TWITTER_TRACKER_ENABLED,
     USE_MEME_COUNCIL,
 )
 from modules.council_gate import council_gate
