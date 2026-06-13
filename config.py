@@ -106,7 +106,9 @@ MAX_BUY_SOL            = 0.015    # never risk more than this per trade (~$2)
 BUY_SIZE_PCT_OF_WALLET = 0.08     # each buy = 8% of tradeable SOL
 
 # Scanner settings — autonomous discovery (Axiom Pulse "graduated" style)
-SCAN_INTERVAL_SECONDS  = int(os.getenv("SCAN_INTERVAL_SECONDS", "15"))
+SCAN_INTERVAL_SECONDS  = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
+SCAN_MAX_CANDIDATES    = int(os.getenv("SCAN_MAX_CANDIDATES", "10"))
+SCAN_MAX_PUMP_EVAL     = int(os.getenv("SCAN_MAX_PUMP_EVAL", "5"))
 SCAN_MIN_SCORE         = int(os.getenv("SCAN_MIN_SCORE", "82"))   # raw score floor
 SCAN_MIN_LIQUIDITY_USD = 18_000   # graduated pool minimum (was 15k — too thin)
 SCAN_MIN_MCAP_USD      = 30_000   # skip micro-dead coins
@@ -116,7 +118,7 @@ SCAN_MIN_BUY_PRESSURE  = float(os.getenv("SCAN_MIN_BUY_PRESSURE", "55"))   # % b
 SCAN_MIN_VOLUME_24H    = float(os.getenv("SCAN_MIN_VOLUME_24H", "200000"))  # $ vol gate
 # GMGN trending = swap volume list (weak). GMGN signals = smart-money buys (strong).
 SCAN_GMGN_TRENDING_BUY = os.getenv("SCAN_GMGN_TRENDING_BUY", "false").lower() in ("true", "1", "yes")
-SCAN_GMGN_SIGNALS_BUY  = os.getenv("SCAN_GMGN_SIGNALS_BUY", "true").lower() in ("true", "1", "yes")
+SCAN_GMGN_SIGNALS_BUY  = os.getenv("SCAN_GMGN_SIGNALS_BUY", "false").lower() in ("true", "1", "yes")
 GMGN_SIGNAL_SCORE_BOOST = int(os.getenv("GMGN_SIGNAL_SCORE_BOOST", "5"))  # was +10 on everything
 SCAN_GRADUATED_ONLY    = True     # Raydium/Orca/Meteora/PumpSwap — sellable
 SCAN_REQUIRE_SELL_TEST = True     # verify Jupiter sell route BEFORE buying
@@ -134,10 +136,13 @@ SCAN_PUMPFUN_MAX_AGE_HOURS   = 6.0    # only fresh pump launches
 PUMP_INITIAL_VIRTUAL_SOL     = 30.0   # pump.fun curve starts ~30 virtual SOL
 PUMP_BONDING_SOL_TARGET      = 85.0   # graduation threshold (~85 SOL)
 
-# Wallet tracker — parallel poll; lower = faster copy (Helius free tier OK at 12s)
-WALLET_POLL_INTERVAL_SECONDS = int(os.getenv("WALLET_POLL_INTERVAL_SECONDS", "20"))
-WALLET_POLL_GAP_SECONDS = float(os.getenv("WALLET_POLL_GAP_SECONDS", "1.5"))
-HELIUS_MIN_INTERVAL_SEC = float(os.getenv("HELIUS_MIN_INTERVAL_SEC", "2.0"))
+DEXSCREENER_MIN_INTERVAL_SEC = float(os.getenv("DEXSCREENER_MIN_INTERVAL_SEC", "1.5"))
+DEXSCREENER_429_BACKOFF_SEC = float(os.getenv("DEXSCREENER_429_BACKOFF_SEC", "90"))
+
+# Wallet tracker — sequential poll; lower rate = fewer Helius 429s
+WALLET_POLL_INTERVAL_SECONDS = int(os.getenv("WALLET_POLL_INTERVAL_SECONDS", "25"))
+WALLET_POLL_GAP_SECONDS = float(os.getenv("WALLET_POLL_GAP_SECONDS", "2.0"))
+HELIUS_MIN_INTERVAL_SEC = float(os.getenv("HELIUS_MIN_INTERVAL_SEC", "3.0"))
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5

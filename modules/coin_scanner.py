@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,8 @@ from config import (
     SCAN_GMGN_TRENDING_BUY,
     SCAN_GRADUATED_ONLY,
     SCAN_INTERVAL_SECONDS,
+    SCAN_MAX_CANDIDATES,
+    SCAN_MAX_PUMP_EVAL,
     SCAN_MAX_MCAP_USD,
     SCAN_MIN_AGE_HOURS,
     SCAN_MIN_BUY_PRESSURE,
@@ -47,6 +50,7 @@ from config import (
     USE_MEME_COUNCIL,
 )
 from modules.council_gate import council_gate
+from modules.dexscreener_limiter import mark_rate_limited, throttle as dex_throttle
 from modules.rugcheck_client import fetch_rug_report
 from modules import pumpfun
 from modules.utils import clamp, fetch_json, sol_to_lamports
@@ -91,14 +95,45 @@ class CoinScanner:
         self._filter_rejected: set[str] = set()
         # Scored below threshold — avoid re-scoring every cycle
         self._scored_low: set[str] = set()
+        self._pair_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._running = False
+
+    async def _dex_fetch(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+        label: str = "DexScreener",
+    ) -> Any | None:
+        await dex_throttle()
+        try:
+            async with self.session.request(
+                method,
+                url,
+                params=params,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status == 429:
+                    mark_rate_limited()
+                    logger.warning("%s rate limited — backing off", label)
+                    return None
+                resp.raise_for_status()
+                return await resp.json()
+        except Exception as exc:
+            if "429" in str(exc):
+                mark_rate_limited()
+            logger.warning("%s failed: %s", label, exc)
+            return None
 
     def _already_processed(self, mint: str) -> bool:
         return mint in self._filter_rejected or mint in self._scored_low
 
     async def _fetch_latest_profiles(self) -> list[str]:
-        data = await fetch_json(
-            self.session, "GET", DEXSCREENER_PROFILES_URL, label="DexScreener profiles",
+        data = await self._dex_fetch(
+            "GET", DEXSCREENER_PROFILES_URL, label="DexScreener profiles",
         )
         if not isinstance(data, list):
             return []
@@ -113,15 +148,12 @@ class CoinScanner:
             (DEXSCREENER_BOOSTS_URL, "DexScreener boosts"),
             (DEXSCREENER_TOP_BOOSTS_URL, "DexScreener top boosts"),
         ]:
-            try:
-                data = await fetch_json(self.session, "GET", url, label=label)
-                if not isinstance(data, list):
-                    continue
-                for item in data:
-                    if item.get("chainId") == "solana" and item.get("tokenAddress"):
-                        mints.append(item["tokenAddress"])
-            except Exception as exc:
-                logger.warning("%s failed: %s", label, exc)
+            data = await self._dex_fetch("GET", url, label=label)
+            if not isinstance(data, list):
+                continue
+            for item in data:
+                if item.get("chainId") == "solana" and item.get("tokenAddress"):
+                    mints.append(item["tokenAddress"])
         return mints
 
     @staticmethod
@@ -171,12 +203,22 @@ class CoinScanner:
             return False
 
     async def _fetch_pair_data(self, mint: str) -> dict[str, Any] | None:
+        cached = self._pair_cache.get(mint)
+        if cached and (time.time() - cached[1]) < 90:
+            return cached[0]
+
         url = DEXSCREENER_TOKEN_URL.format(mint=mint)
-        data = await fetch_json(self.session, "GET", url, label=f"DexScreener token {mint[:8]}")
+        data = await self._dex_fetch(
+            "GET", url, label=f"DexScreener token {mint[:8]}",
+        )
+        if not data:
+            return cached[0] if cached else None
         pairs = data.get("pairs") or []
         if not pairs:
             return None
-        return max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        self._pair_cache[mint] = (pair, time.time())
+        return pair
 
     async def _rugcheck_score(self, mint: str) -> tuple[bool, float]:
         """RugCheck: 0 = safe, higher = riskier. Reject above 500."""
@@ -789,9 +831,10 @@ class CoinScanner:
             tasks.append(("graduated", graduated))
 
         for label, coins in tasks:
-            for coin in coins[:12]:
+            for coin in coins[:SCAN_MAX_PUMP_EVAL]:
                 try:
                     await self._evaluate_pumpfun_coin(coin, label)
+                    await asyncio.sleep(0.6)
                 except Exception as exc:
                     mint = coin.get("mint", "")[:8]
                     logger.error("Pump.fun cycle error %s: %s", mint, exc)
@@ -853,7 +896,9 @@ class CoinScanner:
         profiles = await self._fetch_latest_profiles()
         boosts = await self._fetch_dexscreener_boosts()
         gmgn_trending = await self._fetch_gmgn_trending()
-        gmgn_signals = await self._fetch_gmgn_signals()
+        gmgn_signals: list[str] = []
+        if SCAN_GMGN_SIGNALS_BUY:
+            gmgn_signals = await self._fetch_gmgn_signals()
         dextools = await self._fetch_dextools_hot()
         axiom = await self._fetch_axiom_trending()
 
@@ -871,17 +916,18 @@ class CoinScanner:
                 len(dextools), len(axiom), len(gmgn_trending), len(gmgn_signals),
             )
 
-        for mint in candidates[:20]:
+        for mint in candidates[:SCAN_MAX_CANDIDATES]:
             try:
                 await self._evaluate_token(mint)
             except Exception as exc:
                 logger.error("Error evaluating %s: %s", mint[:8], exc)
 
-        for mint in gmgn_signals[:10]:
-            try:
-                await self._evaluate_gmgn_token(mint, "signals")
-            except Exception as exc:
-                logger.error("Error evaluating GMGN signal %s: %s", mint[:8], exc)
+        if SCAN_GMGN_SIGNALS_BUY:
+            for mint in gmgn_signals[:5]:
+                try:
+                    await self._evaluate_gmgn_token(mint, "signals")
+                except Exception as exc:
+                    logger.error("Error evaluating GMGN signal %s: %s", mint[:8], exc)
 
         if SCAN_GMGN_TRENDING_BUY:
             for mint in gmgn_trending[:10]:
@@ -901,7 +947,8 @@ class CoinScanner:
             + (" + Axiom" if AXIOM_AUTH_TOKEN else "")
             + f" every {SCAN_INTERVAL_SECONDS}s | council {'ON' if USE_MEME_COUNCIL else 'OFF'}"
             f" ({MEME_COUNCIL_MIN}/7 HERMES) | min score {SCAN_MIN_SCORE}"
-            f" | GMGN trending={'ON' if SCAN_GMGN_TRENDING_BUY else 'OFF'}",
+            f" | GMGN trending={'ON' if SCAN_GMGN_TRENDING_BUY else 'OFF'}"
+            f" | GMGN signals={'ON' if SCAN_GMGN_SIGNALS_BUY else 'OFF'}",
         )
 
         while self._running:
