@@ -42,6 +42,7 @@ from config import (
     SCAN_PUMPFUN_MIN_USD_MCAP,
     SCAN_REQUIRE_SELL_TEST,
     SCANNER_BUY_SOL,
+    SCORE_LOW_RETRY_HOURS,
     SELL_SLIPPAGE_BPS,
     SOL_MINT,
     TWITTER_BEARER_TOKEN,
@@ -93,10 +94,11 @@ class CoinScanner:
         self.executor = executor
         # Permanent for this session — filter failures (rug, liq, mcap, etc.)
         self._filter_rejected: set[str] = set()
-        # Scored below threshold — avoid re-scoring every cycle
-        self._scored_low: set[str] = set()
+        # Scored below threshold — re-try after cooldown (markets move)
+        self._scored_low: dict[str, float] = {}
         self._pair_cache: dict[str, tuple[dict[str, Any], float]] = {}
         self._running = False
+        self._gmgn_signals_warn_at = 0.0
 
     async def _dex_fetch(
         self,
@@ -129,7 +131,18 @@ class CoinScanner:
             return None
 
     def _already_processed(self, mint: str) -> bool:
-        return mint in self._filter_rejected or mint in self._scored_low
+        if mint in self._filter_rejected:
+            return True
+        scored_at = self._scored_low.get(mint)
+        if scored_at is None:
+            return False
+        if (time.time() - scored_at) < SCORE_LOW_RETRY_HOURS * 3600:
+            return True
+        del self._scored_low[mint]
+        return False
+
+    def _mark_scored_low(self, mint: str) -> None:
+        self._scored_low[mint] = time.time()
 
     async def _fetch_latest_profiles(self) -> list[str]:
         data = await self._dex_fetch(
@@ -455,7 +468,7 @@ class CoinScanner:
         )
 
         if score < SCAN_MIN_SCORE:
-            self._scored_low.add(mint)
+            self._mark_scored_low(mint)
             return
 
         await self._attempt_buy(
@@ -507,10 +520,20 @@ class CoinScanner:
         if src == "scanner":
             info = pair.get("info", {}) or {}
             has_social = bool(info.get("websites") or info.get("socials"))
+            strong = (
+                raw_score >= SCAN_MIN_SCORE + 2
+                and pressure >= SCAN_MIN_BUY_PRESSURE
+                and vol >= SCAN_MIN_VOLUME_24H
+            )
+            if strong:
+                return True, (
+                    f"DexScreener feed | score {raw_score:.0f} | "
+                    f"flow {pressure:.0f}% | vol ${vol:,.0f}"
+                )
             if raw_score >= SCAN_MIN_SCORE and pressure >= SCAN_MIN_BUY_PRESSURE and vol >= SCAN_MIN_VOLUME_24H:
                 if twitter_mentions >= 1 or has_social:
                     return True, (
-                        f"DexScreener feed | score {raw_score:.0f} | "
+                        f"DexScreener feed + social | score {raw_score:.0f} | "
                         f"flow {pressure:.0f}% | vol ${vol:,.0f}"
                     )
                 return False, f"score ok but no social proof ({twitter_mentions} tweets)"
@@ -519,8 +542,9 @@ class CoinScanner:
             )
 
         if src.startswith("pump"):
-            if raw_score >= SCAN_MIN_SCORE and pressure >= SCAN_MIN_BUY_PRESSURE:
-                return True, f"Pump.fun graduating | score {raw_score:.0f}"
+            pump_floor = max(SCAN_MIN_SCORE - 5, 70)
+            if raw_score >= pump_floor and pressure >= max(SCAN_MIN_BUY_PRESSURE - 5, 45):
+                return True, f"Pump.fun {source} | score {raw_score:.0f} | flow {pressure:.0f}%"
             return False, "pump candidate below score/flow floor"
 
         return True, source
@@ -653,20 +677,16 @@ class CoinScanner:
             return []
 
     async def _fetch_gmgn_signals(self) -> list[str]:
-        """Fetch smart money buy signals from GMGN."""
-        try:
-            data = await fetch_json(
-                self.session, "GET", GMGN_SIGNALS_URL,
-                headers=GMGN_HEADERS, label="GMGN signals",
-            )
-            signals = data.get("data", []) or []
-            mints = [s.get("token_address", "") for s in signals if s.get("token_address")]
-            if mints:
-                logger.info("GMGN smart money signals: %d token(s)", len(mints))
-            return mints
-        except Exception as exc:
-            logger.warning("GMGN signals fetch failed: %s", exc)
+        """GMGN removed this endpoint (404) — use copy trading instead."""
+        if not SCAN_GMGN_SIGNALS_BUY:
             return []
+        now = time.time()
+        if now - self._gmgn_signals_warn_at > 3600:
+            self._gmgn_signals_warn_at = now
+            logger.warning(
+                "GMGN signals API is dead (404) — set SCAN_GMGN_SIGNALS_BUY=false on Railway"
+            )
+        return []
 
     async def _evaluate_gmgn_token(self, mint: str, source: str) -> None:
         """GMGN signals = smart money. GMGN trending = disabled by default (too noisy)."""
@@ -704,7 +724,7 @@ class CoinScanner:
             )
 
             if raw_score < SCAN_MIN_SCORE:
-                self._scored_low.add(mint)
+                self._mark_scored_low(mint)
                 logger.info("GMGN skip %s — raw score %.0f < %d", symbol, raw_score, SCAN_MIN_SCORE)
                 return
 
@@ -793,7 +813,7 @@ class CoinScanner:
 
             threshold = SCAN_MIN_SCORE - (3 if complete else 5)
             if score < threshold:
-                self._scored_low.add(mint)
+                self._mark_scored_low(mint)
                 return
 
             await self._attempt_buy(

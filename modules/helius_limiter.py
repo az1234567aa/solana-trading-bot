@@ -7,7 +7,7 @@ import time
 
 _lock = asyncio.Lock()
 _last_call = 0.0
-MIN_INTERVAL_SEC = float(os.getenv("HELIUS_MIN_INTERVAL_SEC", "3.0"))
+MIN_INTERVAL_SEC = float(os.getenv("HELIUS_MIN_INTERVAL_SEC", "4.0"))
 
 
 async def throttle() -> None:

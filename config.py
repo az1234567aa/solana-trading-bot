@@ -108,14 +108,15 @@ BUY_SIZE_PCT_OF_WALLET = 0.08     # each buy = 8% of tradeable SOL
 # Scanner settings — autonomous discovery (Axiom Pulse "graduated" style)
 SCAN_INTERVAL_SECONDS  = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
 SCAN_MAX_CANDIDATES    = int(os.getenv("SCAN_MAX_CANDIDATES", "10"))
-SCAN_MAX_PUMP_EVAL     = int(os.getenv("SCAN_MAX_PUMP_EVAL", "5"))
-SCAN_MIN_SCORE         = int(os.getenv("SCAN_MIN_SCORE", "82"))   # raw score floor
-SCAN_MIN_LIQUIDITY_USD = 18_000   # graduated pool minimum (was 15k — too thin)
-SCAN_MIN_MCAP_USD      = 30_000   # skip micro-dead coins
-SCAN_MAX_MCAP_USD      = 600_000  # memecoin sweet spot
-SCAN_MIN_AGE_HOURS     = 1.0      # at least 1h old — skip brand-new noise
-SCAN_MIN_BUY_PRESSURE  = float(os.getenv("SCAN_MIN_BUY_PRESSURE", "55"))   # % buys in 24h
-SCAN_MIN_VOLUME_24H    = float(os.getenv("SCAN_MIN_VOLUME_24H", "200000"))  # $ vol gate
+SCAN_MAX_PUMP_EVAL     = int(os.getenv("SCAN_MAX_PUMP_EVAL", "8"))
+SCAN_MIN_SCORE         = int(os.getenv("SCAN_MIN_SCORE", "76"))   # was 82 — too few buys
+SCAN_MIN_LIQUIDITY_USD = int(os.getenv("SCAN_MIN_LIQUIDITY_USD", "15000"))
+SCAN_MIN_MCAP_USD      = 25_000   # skip micro-dead coins
+SCAN_MAX_MCAP_USD      = 800_000  # slightly wider sweet spot
+SCAN_MIN_AGE_HOURS     = float(os.getenv("SCAN_MIN_AGE_HOURS", "0.5"))  # was 1.0h
+SCAN_MIN_BUY_PRESSURE  = float(os.getenv("SCAN_MIN_BUY_PRESSURE", "50"))   # was 55%
+SCAN_MIN_VOLUME_24H    = float(os.getenv("SCAN_MIN_VOLUME_24H", "100000"))  # was 200k
+SCORE_LOW_RETRY_HOURS  = float(os.getenv("SCORE_LOW_RETRY_HOURS", "2"))  # re-scan after cooldown
 # GMGN trending = swap volume list (weak). GMGN signals = smart-money buys (strong).
 SCAN_GMGN_TRENDING_BUY = os.getenv("SCAN_GMGN_TRENDING_BUY", "false").lower() in ("true", "1", "yes")
 SCAN_GMGN_SIGNALS_BUY  = os.getenv("SCAN_GMGN_SIGNALS_BUY", "false").lower() in ("true", "1", "yes")
@@ -140,9 +141,9 @@ DEXSCREENER_MIN_INTERVAL_SEC = float(os.getenv("DEXSCREENER_MIN_INTERVAL_SEC", "
 DEXSCREENER_429_BACKOFF_SEC = float(os.getenv("DEXSCREENER_429_BACKOFF_SEC", "90"))
 
 # Wallet tracker — sequential poll; lower rate = fewer Helius 429s
-WALLET_POLL_INTERVAL_SECONDS = int(os.getenv("WALLET_POLL_INTERVAL_SECONDS", "25"))
-WALLET_POLL_GAP_SECONDS = float(os.getenv("WALLET_POLL_GAP_SECONDS", "2.0"))
-HELIUS_MIN_INTERVAL_SEC = float(os.getenv("HELIUS_MIN_INTERVAL_SEC", "3.0"))
+WALLET_POLL_INTERVAL_SECONDS = int(os.getenv("WALLET_POLL_INTERVAL_SECONDS", "35"))
+WALLET_POLL_GAP_SECONDS = float(os.getenv("WALLET_POLL_GAP_SECONDS", "3.0"))
+HELIUS_MIN_INTERVAL_SEC = float(os.getenv("HELIUS_MIN_INTERVAL_SEC", "4.0"))
 
 # Risk manager settings
 RISK_POLL_INTERVAL_SECONDS = 5
@@ -161,7 +162,7 @@ MAX_HOLD_MINUTES = 45         # never hold longer than 45 min — force sell
 
 # HERMES Meme Council — 7 rule-based agents (zero LLM credits)
 USE_MEME_COUNCIL = os.getenv("USE_MEME_COUNCIL", "true").lower() in ("true", "1", "yes")
-MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "5"))  # 5/7 — no weak abstain buys
+MEME_COUNCIL_MIN = int(os.getenv("MEME_COUNCIL_MIN", "4"))  # was 5 — allow more scanner/copy buys
 COPY_COUNCIL_MIN = int(os.getenv("COPY_COUNCIL_MIN", "4"))  # copy trades: speed priority
 COPY_USE_COUNCIL = os.getenv("COPY_USE_COUNCIL", "true").lower() in ("true", "1", "yes")
 TWITTER_USE_COUNCIL = os.getenv("TWITTER_USE_COUNCIL", "true").lower() in ("true", "1", "yes")
