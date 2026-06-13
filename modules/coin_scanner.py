@@ -608,7 +608,7 @@ class CoinScanner:
             sell_route_ok=sell_ok,
             score=score,
             breakdown=breakdown,
-            birdeye=flow,
+            birdeye=birdeye,
             twitter_mentions=twitter_mentions,
             on_loss_cooldown=rm.on_cooldown(mint) if rm else False,
             prior_losses=rm.prior_loss_count(mint) if rm else 0,
