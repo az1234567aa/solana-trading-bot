@@ -97,6 +97,76 @@ class Executor:
         self._buy_in_flight: set[str] = set()
         self._recent_buys: dict[str, float] = {}  # mint → unix time
         self._balance_cache: dict[str, tuple[float, int, float]] = {}
+        self._sell_alert_at: dict[str, float] = {}
+
+    @staticmethod
+    def _verify_jupiter_swap_tx(raw_tx: VersionedTransaction, own_pk: str) -> None:
+        """Block wallet drains; allow Jupiter-built routes (ATA, token, DEX helpers)."""
+        _SYSTEM = "11111111111111111111111111111111"
+        _SWAP_MARKERS = (
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+            "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+            "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        )
+        _SAFE = {
+            *_SWAP_MARKERS,
+            "JUP3c2Uh3WA4Ng34tw6kPd2G4eZfYavyzfYzjvMjkU7",
+            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+            "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+            "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bC8",
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # Jupiter ATA creates
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+            "ComputeBudget111111111111111111111111111111",
+            _SYSTEM,
+            "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf",  # Jupiter event auth
+        }
+
+        msg = raw_tx.message
+        account_keys = [str(k) for k in msg.account_keys]
+        instructions = msg.instructions
+
+        has_swap = any(
+            k.startswith("JUP") or k in _SWAP_MARKERS for k in account_keys
+        )
+
+        for ix in instructions:
+            idx = ix.program_id_index
+            if idx >= len(account_keys):
+                continue
+            prog = account_keys[idx]
+            if prog == _SYSTEM and len(ix.accounts) == 2:
+                recipient = account_keys[ix.accounts[1]]
+                if recipient != own_pk:
+                    raise ValueError(
+                        f"GUARD BLOCKED — plain SOL transfer to {recipient} detected. "
+                        "This is not a Jupiter swap. Transaction refused."
+                    )
+
+        if not has_swap:
+            raise ValueError(
+                "GUARD BLOCKED — transaction contains no Jupiter or Pump.fun swap. "
+                f"Programs seen: {account_keys}. Transaction refused."
+            )
+
+        # Jupiter built this route — allow helper programs (ATA, token, DEX)
+        unknown = []
+        for ix in instructions:
+            idx = ix.program_id_index
+            if idx >= len(account_keys):
+                continue
+            prog = account_keys[idx]
+            if prog in _SAFE or prog.startswith("JUP"):
+                continue
+            unknown.append(prog)
+        if unknown and not has_swap:
+            raise ValueError(
+                f"GUARD BLOCKED — unknown programs in tx: {unknown}. "
+                "Only Jupiter swap routes are allowed."
+            )
 
     def can_buy_mint(self, mint: str) -> tuple[bool, str]:
         if mint in self._buy_in_flight:
@@ -385,80 +455,7 @@ class Executor:
             raise ValueError("Jupiter swap response missing swapTransaction")
 
         raw_tx = VersionedTransaction.from_bytes(base64.b64decode(swap_tx_b64))
-
-        # ── Transaction guard ────────────────────────────────────────────────
-        # Decode account keys and check every instruction before signing.
-        # Only Jupiter program IDs are allowed. Plain SOL transfers (System
-        # Program + only 2 accounts) are always blocked regardless of source.
-        _JUPITER_PROGRAMS = {
-            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",   # Jupiter v6
-            "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",   # Jupiter v4
-            "JUP3c2Uh3WA4Ng34tw6kPd2G4eZfYavyzfYzjvMjkU7",   # Jupiter v3
-            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",   # Whirlpool
-            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM v4
-            "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # Raydium CLMM
-            "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",  # Raydium CPMM
-            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bC8",  # ATA program
-            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # SPL Token
-            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   # Token-2022
-            "ComputeBudget111111111111111111111111111111",     # Compute budget
-            "11111111111111111111111111111111",                # System Program
-            # Pump.fun bonding curve + PumpSwap AMM (Jupiter routes through these)
-            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-            "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
-        }
-        _SYSTEM_PROGRAM = "11111111111111111111111111111111"
-
-        try:
-            msg = raw_tx.message
-            # solders exposes account_keys as a list of Pubkey objects
-            account_keys = [str(k) for k in msg.account_keys]
-            instructions = msg.instructions
-
-            non_jupiter = []
-            has_jupiter = False
-            has_pump = False
-            for ix in instructions:
-                prog = account_keys[ix.program_id_index]
-                if prog not in _JUPITER_PROGRAMS:
-                    non_jupiter.append(prog)
-                if prog.startswith("JUP"):
-                    has_jupiter = True
-                if prog in ("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"):
-                    has_pump = True
-
-            # Block plain SOL transfer: System Program instruction with exactly
-            # 2 account indices (from + to) = raw lamport send to another wallet
-            for ix in instructions:
-                prog = account_keys[ix.program_id_index]
-                if prog == _SYSTEM_PROGRAM and len(ix.accounts) == 2:
-                    recipient = account_keys[ix.accounts[1]]
-                    own_pk = str(self.keypair.pubkey())
-                    if recipient != own_pk:
-                        raise ValueError(
-                            f"GUARD BLOCKED — plain SOL transfer to {recipient} detected. "
-                            "This is not a Jupiter swap. Transaction refused."
-                        )
-
-            if non_jupiter:
-                raise ValueError(
-                    f"GUARD BLOCKED — unknown programs in tx: {non_jupiter}. "
-                    "Only Jupiter swap routes are allowed."
-                )
-
-            if not has_jupiter and not has_pump:
-                raise ValueError(
-                    f"GUARD BLOCKED — transaction contains no Jupiter or Pump.fun swap. "
-                    f"Programs seen: {account_keys}. Transaction refused."
-                )
-
-        except ValueError:
-            raise
-        except Exception as guard_err:
-            raise ValueError(
-                f"GUARD BLOCKED — could not verify transaction safety: {guard_err}"
-            ) from guard_err
-        # ── End transaction guard ─────────────────────────────────────────────
+        self._verify_jupiter_swap_tx(raw_tx, str(self.keypair.pubkey()))
 
         signature = self.keypair.sign_message(to_bytes_versioned(raw_tx.message))
         signed_tx = VersionedTransaction.populate(raw_tx.message, [signature])
@@ -684,11 +681,15 @@ class Executor:
         logger.error("SELL failed for %s after all retries: %s", mint[:8], last_exc)
         if self.risk_manager:
             try:
-                await self.risk_manager.alerter.send_message(
-                    f"❌ <b>SELL FAILED — {symbol}</b>\n"
-                    f"Tokens still in wallet. Will retry.\n"
-                    f"Error: {str(last_exc)[:150]}"
-                )
+                now = time.time()
+                last = self._sell_alert_at.get(mint, 0)
+                if now - last >= 300:  # max 1 Telegram alert per 5 min per token
+                    self._sell_alert_at[mint] = now
+                    await self.risk_manager.alerter.send_message(
+                        f"❌ <b>SELL FAILED — {symbol}</b>\n"
+                        f"Tokens still in wallet. Will retry.\n"
+                        f"Error: {str(last_exc)[:150]}"
+                    )
             except Exception:
                 pass
         return SellResult(
