@@ -13,7 +13,6 @@ from config import (
     DAILY_LOSS_LIMIT_USD,
     DAILY_PROFIT_TARGET_USD,
     DUST_BALANCE_USD,
-    MAX_BUYS_PER_DAY,
     MAX_HOLD_MINUTES,
     MAX_OPEN_POSITIONS,
     RISK_POLL_INTERVAL_SECONDS,
@@ -288,8 +287,6 @@ class RiskManager:
         self._reset_daily_if_needed()
         if self._halted_today:
             return False, self._halt_reason or "trading paused for today"
-        if self._buys_today >= MAX_BUYS_PER_DAY:
-            return False, f"max {MAX_BUYS_PER_DAY} buys/day reached"
         if self.open_position_count() >= MAX_OPEN_POSITIONS:
             return False, f"max {MAX_OPEN_POSITIONS} open positions"
         return True, ""
@@ -370,8 +367,8 @@ class RiskManager:
             self._halted_today = bool(daily.get("halted_today", False))
             self._halt_reason = str(daily.get("halt_reason", ""))
             logger.info(
-                "Restored daily state — buys %d/%d | PnL $%.2f | halted=%s",
-                self._buys_today, MAX_BUYS_PER_DAY, self._daily_pnl_usd, self._halted_today,
+                "Restored daily state — buys %d today | PnL $%.2f | halted=%s",
+                self._buys_today, self._daily_pnl_usd, self._halted_today,
             )
         else:
             self._reset_daily_if_needed()
@@ -420,9 +417,9 @@ class RiskManager:
             reason=buy.reason, tx=buy.tx_signature,
         )
         logger.info(
-            "Position opened — %s | %.4f tokens @ $%.8f | buy %d/%d today | cost $%.2f",
+            "Position opened — %s | %.4f tokens @ $%.8f | buy #%d today | cost $%.2f",
             buy.symbol, buy.tokens_received, buy.entry_price_usd,
-            self._buys_today, MAX_BUYS_PER_DAY, entry_cost_usd,
+            self._buys_today, entry_cost_usd,
         )
 
     def _current_multiplier(self, position: Position, current_price: float) -> float:

@@ -12,9 +12,9 @@ from config import (
     AUTO_BUY,
     DAILY_LOSS_LIMIT_USD,
     DAILY_PROFIT_TARGET_USD,
-    MAX_BUYS_PER_DAY,
     COPY_COUNCIL_MIN,
     MEME_COUNCIL_MIN,
+    MAX_OPEN_POSITIONS,
     PAPER_TRADE,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
@@ -92,7 +92,7 @@ class Alerter:
             f"<b>{mode}🟢 BOUGHT — {symbol}</b>",
             f"<b>Cost:</b> {amount_sol:.4f} SOL ({format_usd(cost_usd)})",
             f"<b>Why:</b> {reason}",
-            f"<b>Buy #</b>{buys_today}/{MAX_BUYS_PER_DAY} today",
+            f"<b>Buy #</b>{buys_today} today",
         ]
         if score_breakdown:
             for key, value in score_breakdown.items():
@@ -165,8 +165,9 @@ class Alerter:
             lines.append("• Mode: <b>📝 PAPER TRADE</b> (simulated — no real txs)")
             lines.append("• Paper PnL = tracked price only (not Jupiter quotes)")
         lines.extend([
-            f"• Max <b>{MAX_BUYS_PER_DAY} buys/day</b> | locks profit at "
-            f"<b>+${DAILY_PROFIT_TARGET_USD:.0f}/day</b> | stops at <b>-${DAILY_LOSS_LIMIT_USD:.0f}</b>",
+            f"• Stops new buys at <b>-${DAILY_LOSS_LIMIT_USD:.0f}/day</b> loss"
+            f" | locks profit at <b>+${DAILY_PROFIT_TARGET_USD:.0f}/day</b>",
+            f"• Max <b>{MAX_OPEN_POSITIONS} open positions</b> at once",
             f"• Memory: <b>{persistence}</b> — open coins + cooldowns survive restarts",
             f"• Pump.fun scanner: <b>{'ON' if SCAN_PUMPFUN_ENABLED else 'OFF'}</b> (live + graduating + graduated)",
             f"• Twitter caller tracker: <b>{'ON' if TWITTER_TRACKER_ENABLED else 'OFF'}</b>"

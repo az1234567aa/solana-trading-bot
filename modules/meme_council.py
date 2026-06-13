@@ -240,7 +240,7 @@ def _whale(candidate: TokenCandidate) -> AgentVote:
 
 def _hydra(candidate: TokenCandidate) -> AgentVote:
     if not candidate.daily_budget_ok:
-        return AgentVote("HYDRA", "HYD", Vote.REJECT, "daily loss/profit limit or max buys hit")
+        return AgentVote("HYDRA", "HYD", Vote.REJECT, "daily loss/profit limit hit")
     if candidate.source == "copy" and candidate.trader_name:
         return AgentVote(
             "HYDRA", "HYD", Vote.APPROVE,

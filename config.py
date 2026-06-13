@@ -97,8 +97,7 @@ COPY_MIN_GRADUATED_LIQUIDITY_USD = 15_000
 COPY_SKIP_IF_HOLDING = True         # don't buy same token twice
 COPY_REBUY_COOLDOWN_HOURS = 24     # after a losing exit, don't copy-buy same token again
 
-# Trade budget — stop overtrading (main cause of losses)
-MAX_BUYS_PER_DAY       = 3        # max new positions per day (copy + scanner combined)
+# Trade budget — daily loss halt only (no max buys/day cap)
 MAX_OPEN_POSITIONS     = 2        # never hold more than 2 coins at once
 DAILY_LOSS_LIMIT_USD   = 5.0      # stop buying for the day after $5 net loss
 # Lock in wins — stop NEW buys once daily profit hits this (sells still run)
