@@ -146,10 +146,19 @@ class Alerter:
         ]
         await self.send_message("\n".join(lines))
 
-    async def send_startup_message(self, lifetime_pnl: float = 0.0, lifetime_trades: int = 0) -> None:
+    async def send_startup_message(
+        self,
+        lifetime_pnl: float = 0.0,
+        lifetime_trades: int = 0,
+        *,
+        open_positions: list[tuple[str, str]] | None = None,
+        persistence: str = "file",
+    ) -> None:
         lines = [
             "<b>Solana Bot started</b>",
         ]
+        if not PAPER_TRADE and AUTO_BUY and not ALERTS_ONLY:
+            lines.append("• Mode: <b>🔴 LIVE AUTO-BUY</b>")
         if ALERTS_ONLY or not AUTO_BUY:
             lines.append("• Mode: <b>🔔 ALERTS ONLY</b> — HERMES signals, no auto-buy")
         if PAPER_TRADE:
@@ -158,7 +167,7 @@ class Alerter:
         lines.extend([
             f"• Max <b>{MAX_BUYS_PER_DAY} buys/day</b> | locks profit at "
             f"<b>+${DAILY_PROFIT_TARGET_USD:.0f}/day</b> | stops at <b>-${DAILY_LOSS_LIMIT_USD:.0f}</b>",
-            "• Positions + cooldowns survive restarts (PostgreSQL or bot_state.json)",
+            f"• Memory: <b>{persistence}</b> — open coins + cooldowns survive restarts",
             f"• Pump.fun scanner: <b>{'ON' if SCAN_PUMPFUN_ENABLED else 'OFF'}</b> (live + graduating + graduated)",
             f"• Twitter caller tracker: <b>{'ON' if TWITTER_TRACKER_ENABLED else 'OFF'}</b>"
             + (
@@ -173,6 +182,11 @@ class Alerter:
             "• Every buy + sell → Telegram + trade log",
             "• Sells → <b>USDC</b> with running PnL totals",
         ])
+        if open_positions:
+            names = ", ".join(sym for sym, _ in open_positions)
+            lines.append(
+                f"• <b>Resumed monitoring {len(open_positions)} open position(s):</b> {names}"
+            )
         if lifetime_trades > 0:
             sign = "+" if lifetime_pnl >= 0 else ""
             lines.append(

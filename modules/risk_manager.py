@@ -159,9 +159,34 @@ class PositionStore:
                     )
                 """)
             logger.info("PostgreSQL position store ready")
+            await self._migrate_file_to_db()
         except Exception as exc:
             logger.error("PostgreSQL init failed, using file fallback: %s", exc)
             self._pool = None
+
+    async def _migrate_file_to_db(self) -> None:
+        """One-time: copy positions.json into Postgres so redeploys keep open trades."""
+        if self._pool is None:
+            return
+        file_positions = _file_load()
+        if not file_positions:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM positions WHERE closed = FALSE"
+                )
+            if count and int(count) > 0:
+                return
+            for position in file_positions.values():
+                if not position.closed:
+                    await self.save(position)
+            logger.info(
+                "Migrated %d open position(s) from positions.json → PostgreSQL",
+                len(file_positions),
+            )
+        except Exception as exc:
+            logger.warning("File → PostgreSQL migration failed: %s", exc)
 
     async def save(self, position: "Position") -> None:
         if self._pool is None:
@@ -295,6 +320,15 @@ class RiskManager:
         await self.state_store.save({
             "loss_cooldowns": BotStateStore.serialize_cooldowns(self._loss_cooldown),
             "traded_mints": self._traded_mints,
+            "trade_stats": {
+                "lifetime_pnl_usd": self.stats.lifetime_pnl_usd,
+                "lifetime_trades": self.stats.lifetime_trades,
+                "wins": self.stats.wins,
+                "losses": self.stats.losses,
+                "total_spent_usd": self.stats.total_spent_usd,
+                "total_received_usd": self.stats.total_received_usd,
+                "last_updated": self.stats.last_updated,
+            },
             "daily": {
                 "date": self._trading_date,
                 "buys_today": self._buys_today,
@@ -304,6 +338,10 @@ class RiskManager:
             },
         })
 
+    async def _persist_stats(self) -> None:
+        self.stats.save()
+        await self._save_bot_state()
+
     async def initialize(self) -> None:
         await self.store.initialize()
         await self.state_store.initialize()
@@ -312,6 +350,16 @@ class RiskManager:
         raw = await self.state_store.load()
         self._loss_cooldown = BotStateStore.parse_cooldowns(raw.get("loss_cooldowns", {}))
         self._traded_mints = list(raw.get("traded_mints", []))
+
+        ts = raw.get("trade_stats") or {}
+        if ts:
+            fields = TradeStats.__dataclass_fields__
+            self.stats = TradeStats(**{k: ts[k] for k in fields if k in ts})
+            logger.info(
+                "Restored trade stats — %d trades, PnL $%.2f",
+                self.stats.lifetime_trades,
+                self.stats.lifetime_pnl_usd,
+            )
 
         daily = raw.get("daily", {})
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -565,7 +613,7 @@ class RiskManager:
             self.stats.wins += 1
         else:
             self.stats.losses += 1
-        self.stats.save()
+        await self._persist_stats()
 
         log_event(
             "CLOSE", symbol=position.symbol, mint=position.mint,

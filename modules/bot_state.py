@@ -18,6 +18,7 @@ def _default_state() -> dict[str, Any]:
     return {
         "loss_cooldowns": {},       # mint → ISO expiry
         "traded_mints": [],         # recent closed trades (newest first)
+        "trade_stats": {},          # lifetime PnL counters (survives redeploy)
         "daily": {
             "date": "",
             "buys_today": 0,

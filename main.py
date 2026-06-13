@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 
 import aiohttp
@@ -40,6 +41,10 @@ async def main() -> None:
         "ON" if AUTO_BUY else "OFF (alerts only)",
     )
     logger.info("Scanner interval: %ds", config.SCAN_INTERVAL_SECONDS)
+    if os.getenv("RAILWAY_ENVIRONMENT") and not os.getenv("DATABASE_URL"):
+        logger.error(
+            "DATABASE_URL missing on Railway — add PostgreSQL or positions reset on every deploy"
+        )
     logger.info("=" * 60)
 
     if not config.HELIUS_API_KEY or config.HELIUS_API_KEY.startswith("your_"):
@@ -76,6 +81,16 @@ async def main() -> None:
         await alerter.send_startup_message(
             lifetime_pnl=risk_manager.stats.lifetime_pnl_usd,
             lifetime_trades=risk_manager.stats.lifetime_trades,
+            open_positions=[
+                (p.symbol, p.mint)
+                for p in risk_manager.positions.values()
+                if not p.closed
+            ],
+            persistence=(
+                "PostgreSQL ✅"
+                if risk_manager.store._pool is not None
+                else "local file (add DATABASE_URL on Railway)"
+            ),
         )
         logger.info("Wallet: %s", executor.public_key)
 
