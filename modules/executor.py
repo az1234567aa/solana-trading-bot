@@ -17,6 +17,9 @@ from solders.transaction import VersionedTransaction
 import config
 from config import (
     BUY_MINT_COOLDOWN_SEC,
+    BUY_FAIL_COOLDOWN_SEC,
+    BUY_GUARD_BLOCK_COOLDOWN_SEC,
+    BUY_FAIL_ALERT_INTERVAL_SEC,
     BUY_PRIORITY_FEE_LAMPORTS,
     BUY_SIZE_PCT_OF_WALLET,
     BUY_SLIPPAGE_BPS,
@@ -97,8 +100,10 @@ class Executor:
         self._jupiter_last_call = 0.0
         self._buy_in_flight: set[str] = set()
         self._recent_buys: dict[str, float] = {}  # mint → unix time
+        self._buy_failures: dict[str, tuple[float, bool]] = {}  # mint → (time, guard_blocked)
         self._balance_cache: dict[str, tuple[float, int, float]] = {}
         self._sell_alert_at: dict[str, float] = {}
+        self._buy_fail_alert_at: dict[str, float] = {}
 
     @staticmethod
     def _verify_jupiter_swap_tx(raw_tx: VersionedTransaction, own_pk: str) -> None:
@@ -169,9 +174,28 @@ class Executor:
                 "Only Jupiter swap routes are allowed."
             )
 
+    def _record_buy_failure(self, mint: str, err: str) -> None:
+        guard = "GUARD BLOCKED" in err
+        self._buy_failures[mint] = (time.time(), guard)
+        if guard:
+            logger.warning(
+                "Buy blocked by guard for %s — won't retry for %dh",
+                mint[:8], BUY_GUARD_BLOCK_COOLDOWN_SEC // 3600,
+            )
+
     def can_buy_mint(self, mint: str) -> tuple[bool, str]:
         if mint in self._buy_in_flight:
             return False, "buy already in progress"
+        failed = self._buy_failures.get(mint)
+        if failed:
+            failed_at, guard = failed
+            cooldown = BUY_GUARD_BLOCK_COOLDOWN_SEC if guard else BUY_FAIL_COOLDOWN_SEC
+            elapsed = time.time() - failed_at
+            if elapsed < cooldown:
+                mins = int((cooldown - elapsed) // 60)
+                kind = "guard block" if guard else "failed buy"
+                return False, f"{kind} cooldown ({mins}m left)"
+            del self._buy_failures[mint]
         last = self._recent_buys.get(mint, 0)
         if time.time() - last < BUY_MINT_COOLDOWN_SEC:
             return False, f"bought recently ({BUY_MINT_COOLDOWN_SEC // 60}m cooldown)"
@@ -586,14 +610,20 @@ class Executor:
         except Exception as exc:
             err = str(exc)
             logger.error("BUY failed for %s: %s", mint[:8], exc)
-            # Don't spam Telegram for rate limits or duplicate attempts
+            self._record_buy_failure(mint, err)
             alert = "429" not in err and "rate" not in err.lower()
             if alert and self.risk_manager:
                 try:
-                    await self.risk_manager.alerter.send_message(
-                        f"❌ <b>BUY FAILED — {symbol}</b>\n"
-                        f"Error: {err[:200]}"
-                    )
+                    now = time.time()
+                    last_alert = self._buy_fail_alert_at.get(mint, 0)
+                    if now - last_alert >= BUY_FAIL_ALERT_INTERVAL_SEC:
+                        self._buy_fail_alert_at[mint] = now
+                        await self.risk_manager.alerter.send_message(
+                            f"❌ <b>BUY FAILED — {symbol}</b>\n"
+                            f"Error: {err[:200]}\n"
+                            f"<i>Won't retry this token for "
+                            f"{'24h' if 'GUARD BLOCKED' in err else '1h'}.</i>"
+                        )
                 except Exception:
                     pass
             return BuyResult(
