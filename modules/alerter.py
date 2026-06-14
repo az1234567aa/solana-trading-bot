@@ -10,6 +10,7 @@ import aiohttp
 from config import (
     ALERTS_ONLY,
     AUTO_BUY,
+    BOT_PAUSED,
     DAILY_LOSS_LIMIT_USD,
     DAILY_PROFIT_TARGET_USD,
     COPY_COUNCIL_MIN,
@@ -167,7 +168,9 @@ class Alerter:
         lines = [
             "<b>Solana Bot started</b>",
         ]
-        if not PAPER_TRADE and AUTO_BUY and not ALERTS_ONLY:
+        if BOT_PAUSED:
+            lines.append("• Mode: <b>⏸ PAUSED</b> — scanning only, no buys")
+        if not PAPER_TRADE and AUTO_BUY and not ALERTS_ONLY and not BOT_PAUSED:
             lines.append("• Mode: <b>🔴 LIVE AUTO-BUY</b>")
         if ALERTS_ONLY or not AUTO_BUY:
             lines.append("• Mode: <b>🔔 ALERTS ONLY</b> — HERMES signals, no auto-buy")

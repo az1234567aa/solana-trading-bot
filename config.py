@@ -26,14 +26,22 @@ class TraderConfig:
     copy_amount_sol: float
 
 
+# Emergency pause — set BOT_PAUSED=false on Railway to resume buying
+BOT_PAUSED = os.getenv("BOT_PAUSED", "true").lower() in ("true", "1", "yes")
+
 # Mode — ALERTS_ONLY disables all auto-buys (Telegram signals only)
 ALERTS_ONLY = os.getenv("ALERTS_ONLY", "false").lower() in ("true", "1", "yes")
-AUTO_BUY = os.getenv("AUTO_BUY", "false" if ALERTS_ONLY else "true").lower() in ("true", "1", "yes")
+AUTO_BUY = (
+    os.getenv("AUTO_BUY", "false" if ALERTS_ONLY else "true").lower() in ("true", "1", "yes")
+    and not BOT_PAUSED
+)
 
 # Copy best GMGN-vetted traders + autonomous market scanner (both run together)
-ENABLE_COPY_TRADING = os.getenv(
-    "ENABLE_COPY_TRADING", "false" if ALERTS_ONLY else "true",
-).lower() in ("true", "1", "yes")
+ENABLE_COPY_TRADING = (
+    os.getenv("ENABLE_COPY_TRADING", "false" if ALERTS_ONLY else "true").lower()
+    in ("true", "1", "yes")
+    and not BOT_PAUSED
+)
 ENABLE_SCANNER = os.getenv("ENABLE_SCANNER", "true").lower() in ("true", "1", "yes")
 COPY_BUY_SOL = 0.015  # fallback cap — actual size is wallet-based (see BUY_SIZE_*)
 

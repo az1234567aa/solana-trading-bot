@@ -24,6 +24,8 @@ async def main() -> None:
     setup_logging()
 
     mode = "PAPER TRADE" if config.PAPER_TRADE else "LIVE TRADING"
+    if config.BOT_PAUSED:
+        mode += " · ⏸ PAUSED (no buys)"
     if config.ALERTS_ONLY or not AUTO_BUY:
         mode += " · ALERTS ONLY (no auto-buy)"
     logger.info("=" * 60)
